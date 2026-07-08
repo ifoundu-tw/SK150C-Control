@@ -1,0 +1,3 @@
+Codex write permission check.
+Created at 2026-07-08 Asia/Taipei.
+This file can be deleted.

@@ -24,7 +24,8 @@ namespace SK150CControl
 
     public sealed class MainForm : Form
     {
-        private const string VersionName = "SK150C_Control_v25";
+        private const string VersionName = "SK150C_Control_v32";
+        private const int MaxLogLines = 2000;
         private static readonly Color VoltageColor = Color.FromArgb(36, 150, 96);
         private static readonly Color CurrentColor = Color.FromArgb(184, 134, 11);
         private static readonly Color PowerColor = Color.FromArgb(196, 68, 62);
@@ -53,6 +54,7 @@ namespace SK150CControl
         private readonly InlineValuePanel outputStateTile = new InlineValuePanel("輸出狀態", "", Color.FromArgb(31, 38, 46), 15F);
         private readonly InlineValuePanel capacityTile = new InlineValuePanel("容量 AH", "Ah", CurrentColor, 15F);
         private readonly InlineValuePanel energyTile = new InlineValuePanel("能量 WH", "Wh", PowerColor, 15F);
+        private readonly InlineValuePanel timerTile = new InlineValuePanel("計時器", "", Color.FromArgb(31, 38, 46), 15F);
         private readonly InlineValuePanel protectTile = new InlineValuePanel("保護狀態", "", Color.FromArgb(31, 38, 46), 15F);
         private readonly TrendChart trendChart = new TrendChart();
 
@@ -80,7 +82,6 @@ namespace SK150CControl
         private readonly Button outputOffButton = new Button();
         private readonly Button clearLogButton = new Button();
         private readonly Button refreshQuickGroupsButton = new Button();
-        private readonly Label callGroupLabel = new Label();
         private readonly Label editGroupLabel = new Label();
         private readonly Dictionary<StepEditor, Panel> parameterBlocks = new Dictionary<StepEditor, Panel>();
         private readonly Dictionary<int, QuickGroupButton> quickGroupButtons = new Dictionary<int, QuickGroupButton>();
@@ -105,9 +106,14 @@ namespace SK150CControl
         private int crcErrorCount;
         private int retryCount;
         private int currentGroup;
+        private int activeQuickGroup = -1;
         private int pollCounter;
         private int editGroup = -1;
         private int pollIntervalMs = 1000;
+        private int consecutivePollFailures;
+        private bool pollBackoffActive;
+        private int logLineCount;
+        private int currentProtectCode;
         private bool syncingOptions;
         private bool startupAutoConnectAttempted;
 
@@ -190,7 +196,7 @@ namespace SK150CControl
             clearLogButton.Height = 26;
             clearLogButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             clearLogButton.Location = new Point(logPanel.Width - 76, 8);
-            clearLogButton.Click += delegate { logBox.Clear(); };
+            clearLogButton.Click += delegate { logBox.Clear(); logLineCount = 0; };
             logPanel.Controls.Add(clearLogButton);
             logPanel.Resize += delegate { clearLogButton.Left = logPanel.Width - 76; };
         }
@@ -318,11 +324,7 @@ namespace SK150CControl
             languageBox.SelectedIndexChanged += delegate { ApplyLanguage(); };
             AddRow(flow, 24, "語言", languageBox);
 
-            stateLabel.Text = StatusText("待命");
-            stateLabel.Dock = DockStyle.Fill;
-            stateLabel.ForeColor = Color.FromArgb(76, 86, 96);
-            flow.Controls.Add(stateLabel, 0, 25);
-            flow.SetColumnSpan(stateLabel, 2);
+            SetStatusText("待命");
             container.Controls.Add(BuildSignaturePanel(), 0, 1);
             return panel;
         }
@@ -337,29 +339,54 @@ namespace SK150CControl
 
             var tiles = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 5 };
             powerTile.ShowTrend = true;
+            ApplyTileGroupColors();
             for (int i = 0; i < 4; i++) tiles.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25F));
             for (int i = 0; i < 5; i++) tiles.RowStyles.Add(new RowStyle(SizeType.Percent, 20F));
-            tiles.Controls.Add(voutTile, 0, 0);
-            tiles.Controls.Add(setVoltageTile, 1, 0);
+            tiles.Controls.Add(setVoltageTile, 0, 0);
+            tiles.Controls.Add(capacityTile, 1, 0);
             tiles.Controls.Add(powerTile, 2, 0);
             tiles.SetRowSpan(powerTile, 3);
             tiles.SetColumnSpan(powerTile, 2);
-            tiles.Controls.Add(ioutTile, 0, 1);
-            tiles.Controls.Add(setCurrentTile, 1, 1);
+            tiles.Controls.Add(setCurrentTile, 0, 1);
+            tiles.Controls.Add(energyTile, 1, 1);
             tiles.Controls.Add(ovpTile, 0, 2);
-            tiles.Controls.Add(ocpTile, 1, 2);
-            tiles.Controls.Add(temperatureTile, 0, 3);
+            tiles.Controls.Add(timerTile, 1, 2);
+            tiles.Controls.Add(ocpTile, 0, 3);
             tiles.Controls.Add(modeTile, 1, 3);
-            tiles.Controls.Add(outputStateTile, 2, 3);
-            tiles.Controls.Add(capacityTile, 0, 4);
-            tiles.Controls.Add(energyTile, 1, 4);
-            tiles.Controls.Add(protectTile, 2, 4);
-            SetupCallGroupBadge();
-            tiles.Controls.Add(callGroupLabel, 3, 3);
-            tiles.SetRowSpan(callGroupLabel, 2);
+            tiles.Controls.Add(voutTile, 2, 3);
+            tiles.Controls.Add(temperatureTile, 0, 4);
+            tiles.Controls.Add(outputStateTile, 1, 4);
+            tiles.Controls.Add(ioutTile, 2, 4);
+            SetupStatusBadge(stateLabel, StatusText("待命"), Color.FromArgb(35, 96, 73), 16F);
+            tiles.Controls.Add(stateLabel, 3, 3);
+            tiles.SetRowSpan(stateLabel, 2);
             layout.Controls.Add(trendChart, 0, 0);
             layout.Controls.Add(tiles, 0, 1);
             return panel;
+        }
+
+        private void ApplyTileGroupColors()
+        {
+            Color target = Color.FromArgb(239, 248, 243);
+            Color running = Color.FromArgb(239, 245, 250);
+            Color actual = Color.FromArgb(252, 241, 241);
+
+            setVoltageTile.SetBaseBackColor(target);
+            setCurrentTile.SetBaseBackColor(target);
+            ovpTile.SetBaseBackColor(target);
+            ocpTile.SetBaseBackColor(target);
+            temperatureTile.SetBaseBackColor(target);
+
+            capacityTile.SetBaseBackColor(running);
+            energyTile.SetBaseBackColor(running);
+            timerTile.SetBaseBackColor(running);
+            modeTile.SetBaseBackColor(running);
+            outputStateTile.SetBaseBackColor(running);
+
+            powerTile.SetBaseBackColor(actual);
+            voutTile.SetBaseBackColor(actual);
+            ioutTile.SetBaseBackColor(actual);
+            protectTile.SetBaseBackColor(actual);
         }
 
         private Control BuildIntervalButtons()
@@ -573,11 +600,6 @@ namespace SK150CControl
             return panel;
         }
 
-        private void SetupCallGroupBadge()
-        {
-            SetupStatusBadge(callGroupLabel, "目前調用：--", Color.FromArgb(35, 96, 73), 16F);
-        }
-
         private static void SetupStatusBadge(Label label, string text, Color backColor, float fontSize)
         {
             label.Text = text;
@@ -681,9 +703,11 @@ namespace SK150CControl
                 serial.ReadTimeout = 300;
                 serial.WriteTimeout = 800;
                 serial.Open();
+                consecutivePollFailures = 0;
+                pollBackoffActive = false;
                 statusLabel.Text = Ui("已連線") + "  " + serial.PortName + "  " + serial.BaudRate + "  8N1";
                 statusLabel.ForeColor = Color.FromArgb(134, 216, 160);
-                stateLabel.Text = StatusText("已連線");
+                SetStatusText("已連線");
                 pollTimer.Interval = PollIntervalMs();
                 Log("SYS", "connected");
                 QueueQuickGroupSummaryScan(true);
@@ -706,7 +730,9 @@ namespace SK150CControl
             }
             statusLabel.Text = Ui("未連線");
             statusLabel.ForeColor = Color.FromArgb(255, 214, 102);
-            stateLabel.Text = StatusText("待命");
+            SetStatusText("待命");
+            consecutivePollFailures = 0;
+            pollBackoffActive = false;
             Log("SYS", "disconnected");
         }
 
@@ -732,6 +758,9 @@ namespace SK150CControl
                         int ahHigh = Word(response, 17);
                         int whLow = Word(response, 19);
                         int whHigh = Word(response, 21);
+                        int runHour = Word(response, 23);
+                        int runMinute = Word(response, 25);
+                        int runSecond = Word(response, 27);
                         int temperature = Word(response, 29);
                         int keyLock = Word(response, 33);
                         int protect = Word(response, 35);
@@ -741,13 +770,17 @@ namespace SK150CControl
                         {
                             UpdateSetValues(vset / 100.0, iset / 1000.0);
                             UpdateValues(vout / 100.0, iout / 1000.0, power / 100.0);
-                            UpdateStatusValues(temperature / 10.0, cvcc, onoff, protect, CombineWords(ahHigh, ahLow) / 1000.0, CombineWords(whHigh, whLow) / 1000.0, keyLock);
+                            UpdateStatusValues(temperature / 10.0, cvcc, onoff, protect, CombineWords(ahHigh, ahLow) / 1000.0, CombineWords(whHigh, whLow) / 1000.0, runHour, runMinute, runSecond, keyLock);
                         }));
                     }
+                    BeginInvoke((Action)(() => NotePollResult(response != null)));
 
-                    SyncProtectionFromGroup();
-                    pollCounter++;
-                    if (pollCounter % 5 == 0) SyncDeviceOptions();
+                    if (response != null)
+                    {
+                        SyncProtectionFromGroup();
+                        pollCounter++;
+                        if (pollCounter % 5 == 0) SyncDeviceOptions();
+                    }
                 }
                 finally
                 {
@@ -765,10 +798,10 @@ namespace SK150CControl
             }
             if (busy)
             {
-                callGroupLabel.Text = ActivePresetText("忙碌中");
+                SetStatusText("忙碌中");
                 return;
             }
-            callGroupLabel.Text = ActivePresetText("M" + group + " 讀取中");
+            SetStatusText("M" + group + " 讀取中");
             busy = true;
             ThreadPool.QueueUserWorkItem(delegate
             {
@@ -777,7 +810,7 @@ namespace SK150CControl
                     var groupData = ExecuteWithRetry(BuildRead(GroupBase(group), 6), ExpectedReadLength(6));
                     if (groupData == null)
                     {
-                        BeginInvoke((Action)(() => callGroupLabel.Text = ActivePresetText("M" + group + " 讀取失敗")));
+                        BeginInvoke((Action)(() => SetStatusText("M" + group + " 讀取失敗")));
                         return;
                     }
 
@@ -787,7 +820,7 @@ namespace SK150CControl
                         UpdateGroupEditor(groupData, true);
                         UpdateQuickGroupButton(group, Word(groupData, 3) / 100.0, Word(groupData, 5) / 1000.0);
                         editGroupLabel.Text = "保護寫入：目前 M 組";
-                        callGroupLabel.Text = ActivePresetText("M" + group + " 調用中");
+                        SetStatusText("M" + group + " 調用中");
                     }));
 
                     byte[] response = ExecuteWithRetry(BuildWriteSingle(0x001D, group), 8);
@@ -798,13 +831,13 @@ namespace SK150CControl
                         SyncSettingsFromDevice();
                         BeginInvoke((Action)(() =>
                         {
-                            callGroupLabel.Text = ActivePresetText("M" + group);
-                            stateLabel.Text = StatusText("已調用 M" + group + " 並同步");
+                            SetActiveQuickGroup(group);
+                            SetStatusText("已調用 M" + group + " 並同步");
                         }));
                     }
                     else
                     {
-                        BeginInvoke((Action)(() => callGroupLabel.Text = ActivePresetText("M" + group + " 失敗")));
+                        BeginInvoke((Action)(() => SetStatusText("M" + group + " 失敗")));
                     }
                 }
                 finally
@@ -838,7 +871,7 @@ namespace SK150CControl
                     claimedBusy = true;
                     BeginInvoke((Action)(() =>
                     {
-                        stateLabel.Text = StatusText("讀取快捷組摘要 M0-M10");
+                        SetStatusText("讀取快捷組摘要 M0-M10");
                         if (manualRefresh)
                         {
                             refreshQuickGroupsButton.Enabled = false;
@@ -863,7 +896,7 @@ namespace SK150CControl
                     }
                     BeginInvoke((Action)(() =>
                     {
-                        stateLabel.Text = StatusText("快捷組摘要已更新");
+                        SetStatusText("快捷組摘要已更新");
                         if (startPollingAfter && autoPollBox.Checked)
                         {
                             pollTimer.Interval = PollIntervalMs();
@@ -892,7 +925,7 @@ namespace SK150CControl
             }
             if (busy)
             {
-                stateLabel.Text = StatusText("忙碌，稍後再刷新 M0-M10");
+                SetStatusText("忙碌，稍後再刷新 M0-M10");
                 return;
             }
             bool restartPolling = pollTimer.Enabled && autoPollBox.Checked;
@@ -926,7 +959,7 @@ namespace SK150CControl
                         {
                             UpdateGroupEditor(groupData, true);
                             editGroupLabel.Text = "正在編輯：M" + group;
-                            stateLabel.Text = StatusText("正在編輯 M" + group);
+                            SetStatusText("正在編輯 M" + group);
                         }));
                     }
                     else
@@ -1002,7 +1035,7 @@ namespace SK150CControl
                     {
                         BeginInvoke((Action)(() =>
                         {
-                            stateLabel.Text = StatusText("忙碌，寫入未送出");
+                            SetStatusText("忙碌，寫入未送出");
                             Log("SYS", label + " skipped: busy");
                         }));
                         return;
@@ -1032,7 +1065,7 @@ namespace SK150CControl
             }
             editor.SetWriting(true);
             UpdateParameterBlockDirty(editor);
-            stateLabel.Text = StatusText(label + " 寫入確認中");
+            SetStatusText(label + " 寫入確認中");
             ThreadPool.QueueUserWorkItem(delegate
             {
                 bool claimedBusy = false;
@@ -1050,7 +1083,7 @@ namespace SK150CControl
                         {
                             editor.SetDirty(true);
                             UpdateParameterBlockDirty(editor);
-                            stateLabel.Text = StatusText("忙碌，" + label + " 未送出");
+                            SetStatusText("忙碌，" + label + " 未送出");
                         }));
                         return;
                     }
@@ -1064,7 +1097,7 @@ namespace SK150CControl
                         {
                             editor.SetDirty(true);
                             UpdateParameterBlockDirty(editor);
-                            stateLabel.Text = StatusText(label + " 寫入無回應");
+                            SetStatusText(label + " 寫入無回應");
                         }));
                         return;
                     }
@@ -1080,13 +1113,13 @@ namespace SK150CControl
                             {
                                 ClearDirty(editor);
                                 if (confirmedAction != null) confirmedAction();
-                                stateLabel.Text = StatusText(label + " 已確認");
+                                SetStatusText(label + " 已確認");
                             }
                             else
                             {
                                 editor.SetDirty(true);
                                 UpdateParameterBlockDirty(editor);
-                                stateLabel.Text = StatusText(label + " 未確認，寫入 " + value.ToString(CultureInfo.InvariantCulture) + " 讀回 " + readBack.ToString(CultureInfo.InvariantCulture));
+                                SetStatusText(label + " 未確認，寫入 " + value.ToString(CultureInfo.InvariantCulture) + " 讀回 " + readBack.ToString(CultureInfo.InvariantCulture));
                             }
                         }));
                     }
@@ -1096,7 +1129,7 @@ namespace SK150CControl
                         {
                             editor.SetDirty(true);
                             UpdateParameterBlockDirty(editor);
-                            stateLabel.Text = StatusText(label + " 讀回失敗");
+                            SetStatusText(label + " 讀回失敗");
                         }));
                     }
                 }
@@ -1229,7 +1262,7 @@ namespace SK150CControl
             {
                 failCount++;
                 UpdateCounters();
-                stateLabel.Text = StatusText("無回應");
+                SetStatusText("無回應");
             }));
             return null;
         }
@@ -1350,7 +1383,6 @@ namespace SK150CControl
             powerTile.SetValue(power, "0.00");
             powerTile.AddTrendPoint(power);
             trendChart.AddPoint(vout, iout, power);
-            stateLabel.Text = StatusText("正常");
         }
 
         private void UpdateSetValues(double voltage, double current)
@@ -1430,14 +1462,20 @@ namespace SK150CControl
             block.Invalidate();
         }
 
-        private void UpdateStatusValues(double temperature, int cvcc, int onoff, int protect, double ah, double wh, int keyLock)
+        private void UpdateStatusValues(double temperature, int cvcc, int onoff, int protect, double ah, double wh, int runHour, int runMinute, int runSecond, int keyLock)
         {
             temperatureTile.SetValue(temperature, "0.0");
             modeTile.SetText(cvcc == 1 ? "CC" : "CV");
             outputStateTile.SetText(onoff == 1 ? "ON" : "OFF");
+            int previousProtectCode = currentProtectCode;
+            currentProtectCode = protect;
             protectTile.SetText(ProtectText(protect));
+            protectTile.SetAlert(protect != 0);
+            if (protect != 0) SetStatusText("保護：" + ProtectText(protect));
+            else if (previousProtectCode != 0) SetStatusText("正常");
             capacityTile.SetValue(ah, "0.000");
             energyTile.SetValue(wh, "0.000");
+            timerTile.SetText(FormatRunTime(runHour, runMinute, runSecond));
 
             syncingOptions = true;
             try
@@ -1450,23 +1488,35 @@ namespace SK150CControl
             }
         }
 
-        private static string ProtectText(int code)
+        private static string FormatRunTime(int hours, int minutes, int seconds)
         {
+            if (minutes < 0) minutes = 0;
+            if (seconds < 0) seconds = 0;
+            minutes = Math.Min(99, minutes);
+            seconds = Math.Min(99, seconds);
+            return hours.ToString("00", CultureInfo.InvariantCulture) + ":" +
+                minutes.ToString("00", CultureInfo.InvariantCulture) + ":" +
+                seconds.ToString("00", CultureInfo.InvariantCulture);
+        }
+
+        private string ProtectText(int code)
+        {
+            bool english = IsEnglishUi();
             switch (code)
             {
-                case 0: return "正常";
-                case 1: return "OVP";
-                case 2: return "OCP";
-                case 3: return "OPP";
-                case 4: return "LVP";
-                case 5: return "OAH";
-                case 6: return "OHP";
-                case 7: return "OTP";
-                case 8: return "OEP";
-                case 9: return "OWH";
-                case 10: return "ICP";
-                case 11: return "IVP";
-                default: return "代碼 " + code.ToString(CultureInfo.InvariantCulture);
+                case 0: return english ? "Normal" : "正常";
+                case 1: return english ? "OVP Over Voltage" : "OVP 過壓保護";
+                case 2: return english ? "OCP Over Current" : "OCP 過流保護";
+                case 3: return english ? "OPP Over Power" : "OPP 過功率保護";
+                case 4: return english ? "LVP Low Voltage" : "LVP 低壓保護";
+                case 5: return english ? "OAH Over Capacity" : "OAH 超容量保護";
+                case 6: return english ? "OHP Over Time" : "OHP 超時保護";
+                case 7: return english ? "OTP Over Temperature" : "OTP 過溫保護";
+                case 8: return english ? "OEP Over Energy" : "OEP 超能量保護";
+                case 9: return english ? "OWH Over Wh" : "OWH 超瓦時保護";
+                case 10: return english ? "ICP Input Current Protection" : "ICP 輸入電流保護";
+                case 11: return english ? "IVP Input Voltage Protection" : "IVP 輸入電壓保護";
+                default: return english ? "Code " + code.ToString(CultureInfo.InvariantCulture) : "代碼 " + code.ToString(CultureInfo.InvariantCulture);
             }
         }
 
@@ -1491,6 +1541,16 @@ namespace SK150CControl
             }
             button.SetValues(voltage.HasValue ? FormatGroupVoltage(voltage.Value) : "--V",
                 current.HasValue ? FormatGroupCurrent(current.Value) : "--A");
+            button.IsActive = group == activeQuickGroup;
+        }
+
+        private void SetActiveQuickGroup(int group)
+        {
+            activeQuickGroup = group;
+            foreach (var item in quickGroupButtons)
+            {
+                item.Value.IsActive = item.Key == group;
+            }
         }
 
         private void UpdateCurrentGroupVoltage(double voltage)
@@ -1527,16 +1587,41 @@ namespace SK150CControl
 
         private int PollIntervalMs()
         {
-            return pollIntervalMs;
+            return pollBackoffActive ? Math.Max(2000, pollIntervalMs) : pollIntervalMs;
         }
 
         private void SetPollInterval(int interval)
         {
             pollIntervalMs = interval;
-            pollTimer.Interval = interval;
+            pollTimer.Interval = PollIntervalMs();
             StyleIntervalButton(interval100Button, interval == 100);
             StyleIntervalButton(interval300Button, interval == 300);
             StyleIntervalButton(interval1000Button, interval == 1000);
+        }
+
+        private void NotePollResult(bool ok)
+        {
+            if (ok)
+            {
+                bool recovered = consecutivePollFailures > 0 || pollBackoffActive;
+                consecutivePollFailures = 0;
+                if (pollBackoffActive)
+                {
+                    pollBackoffActive = false;
+                    pollTimer.Interval = PollIntervalMs();
+                    Log("SYS", "poll interval restored " + pollIntervalMs.ToString(CultureInfo.InvariantCulture) + "ms");
+                }
+                if (recovered && currentProtectCode == 0) SetStatusText("正常");
+                return;
+            }
+
+            consecutivePollFailures++;
+            if (consecutivePollFailures >= 3 && !pollBackoffActive)
+            {
+                pollBackoffActive = true;
+                pollTimer.Interval = PollIntervalMs();
+                Log("SYS", "poll backoff " + pollTimer.Interval.ToString(CultureInfo.InvariantCulture) + "ms after consecutive failures");
+            }
         }
 
         private void ApplyQuickInputMode()
@@ -1555,6 +1640,9 @@ namespace SK150CControl
             bool english = languageBox.SelectedItem != null && languageBox.SelectedItem.ToString() == "English";
             Text = english ? "SK150C Modbus Control Console" : "SK150C Modbus 控制台";
             ApplyLanguageToControls(this, english);
+            protectTile.SetText(ProtectText(currentProtectCode));
+            protectTile.SetAlert(currentProtectCode != 0);
+            if (currentProtectCode != 0) SetStatusText("保護：" + ProtectText(currentProtectCode));
         }
 
         private void ApplyLanguageToControls(Control parent, bool english)
@@ -1574,12 +1662,14 @@ namespace SK150CControl
             if (english)
             {
                 if (text.StartsWith("狀態：")) return "Status: " + TranslateUiText(text.Substring(3), true);
+                if (text.StartsWith("保護：")) return "Protection: " + TranslateUiText(text.Substring(3), true);
                 if (text.StartsWith("目前調用：")) return "Active Preset: " + TranslateUiText(text.Substring(5), true);
                 if (text.StartsWith("正在編輯：")) return "Editing: " + TranslateUiText(text.Substring(5), true);
             }
             else
             {
                 if (text.StartsWith("Status: ")) return "狀態：" + TranslateUiText(text.Substring(8), false);
+                if (text.StartsWith("Protection: ")) return "保護：" + TranslateUiText(text.Substring(12), false);
                 if (text.StartsWith("Active Preset: ")) return "目前調用：" + TranslateUiText(text.Substring(15), false);
                 if (text.StartsWith("Editing: ")) return "正在編輯：" + TranslateUiText(text.Substring(9), false);
             }
@@ -1672,6 +1762,7 @@ namespace SK150CControl
                 { "輸出狀態", "Output State" },
                 { "容量 AH", "Capacity AH" },
                 { "能量 WH", "Energy WH" },
+                { "計時器", "Timer" },
                 { "保護狀態", "Protection" },
                 { "輸出控制", "Output Control" },
                 { "快速輸入", "Quick Input" },
@@ -1727,6 +1818,18 @@ namespace SK150CControl
             return IsEnglishUi() ? "Status: " + TranslateUiText(zh, true) : "狀態：" + zh;
         }
 
+        private void SetStatusText(string zh)
+        {
+            if (currentProtectCode != 0 && !zh.StartsWith("保護："))
+            {
+                zh = "保護：" + ProtectText(currentProtectCode);
+            }
+            stateLabel.Text = zh.StartsWith("保護：") ? TranslateUiText(zh, IsEnglishUi()) : StatusText(zh);
+            bool alert = currentProtectCode != 0 || zh.StartsWith("保護：");
+            stateLabel.BackColor = alert ? Color.FromArgb(185, 28, 28) : Color.FromArgb(35, 96, 73);
+            stateLabel.ForeColor = Color.White;
+        }
+
         private string ActivePresetText(string zh)
         {
             return IsEnglishUi() ? "Active Preset: " + TranslateUiText(zh, true) : "目前調用：" + zh;
@@ -1760,6 +1863,31 @@ namespace SK150CControl
                 return;
             }
             logBox.AppendText(DateTime.Now.ToString("HH:mm:ss.fff ") + dir.PadRight(3) + " " + text + Environment.NewLine);
+            logLineCount++;
+            TrimLogIfNeeded();
+        }
+
+        private void TrimLogIfNeeded()
+        {
+            if (logLineCount <= MaxLogLines + 200) return;
+            int removeLines = logLineCount - MaxLogLines;
+            int removeIndex = 0;
+            for (int i = 0; i < removeLines; i++)
+            {
+                int next = logBox.Text.IndexOf('\n', removeIndex);
+                if (next < 0)
+                {
+                    logBox.Clear();
+                    logLineCount = 0;
+                    return;
+                }
+                removeIndex = next + 1;
+            }
+            logBox.Select(0, removeIndex);
+            logBox.SelectedText = "";
+            logLineCount = MaxLogLines;
+            logBox.SelectionStart = logBox.TextLength;
+            logBox.ScrollToCaret();
         }
 
         private static string Hex(byte[] data)
@@ -1914,9 +2042,11 @@ namespace SK150CControl
         private readonly string unit;
         private readonly Color accent;
         private readonly float valueFontSize;
-        private readonly List<double> trend = new List<double>();
-        private const int MaxTrendPoints = 240;
+        private readonly List<PowerTrendPoint> trend = new List<PowerTrendPoint>();
+        private static readonly TimeSpan RawWindow = TimeSpan.FromHours(1);
+        private Color baseBackColor = Color.FromArgb(250, 251, 252);
         private bool showTrend;
+        private bool alert;
 
         public bool ShowTrend
         {
@@ -1936,7 +2066,7 @@ namespace SK150CControl
             valueFontSize = fontSize;
             Dock = DockStyle.Fill;
             Margin = new Padding(0, 0, 8, 8);
-            BackColor = Color.FromArgb(250, 251, 252);
+            BackColor = baseBackColor;
 
             titleLabel.Text = title;
             titleLabel.ForeColor = Color.FromArgb(92, 103, 115);
@@ -1958,21 +2088,42 @@ namespace SK150CControl
 
         public void SetValue(double number, string format)
         {
-            valueLabel.Text = number.ToString(format, CultureInfo.InvariantCulture) + (unit.Length == 0 ? "" : " " + unit);
+            string next = number.ToString(format, CultureInfo.InvariantCulture) + (unit.Length == 0 ? "" : " " + unit);
+            if (valueLabel.Text == next) return;
+            valueLabel.Text = next;
             FitValueFont();
         }
 
         public void SetText(string text)
         {
+            if (valueLabel.Text == text) return;
             valueLabel.Text = text;
             FitValueFont();
+        }
+
+        public void SetBaseBackColor(Color color)
+        {
+            baseBackColor = color;
+            if (!alert) BackColor = baseBackColor;
+            Invalidate();
+        }
+
+        public void SetAlert(bool value)
+        {
+            alert = value;
+            BackColor = alert ? Color.FromArgb(185, 28, 28) : baseBackColor;
+            titleLabel.ForeColor = alert ? Color.White : Color.FromArgb(92, 103, 115);
+            valueLabel.ForeColor = alert ? Color.White : accent;
+            Invalidate();
         }
 
         public void AddTrendPoint(double value)
         {
             if (!ShowTrend) return;
-            trend.Add(value);
-            if (trend.Count > MaxTrendPoints) trend.RemoveAt(0);
+            DateTime now = DateTime.Now;
+            trend.Add(new PowerTrendPoint { Time = now, Value = value });
+            DateTime cutoff = now - RawWindow;
+            while (trend.Count > 0 && trend[0].Time < cutoff) trend.RemoveAt(0);
             Invalidate();
         }
 
@@ -2018,7 +2169,7 @@ namespace SK150CControl
             {
                 e.Graphics.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
             }
-            using (var pen = new Pen(accent, 3F))
+            using (var pen = new Pen(alert ? Color.White : accent, 3F))
             {
                 e.Graphics.DrawLine(pen, 1, 3, 1, Height - 4);
             }
@@ -2028,43 +2179,113 @@ namespace SK150CControl
         private void DrawMiniTrend(Graphics g)
         {
             if (trend.Count < 2) return;
-            var rect = new Rectangle(12, Math.Max(34, Height / 2), Math.Max(10, Width - 24), Math.Max(18, Height - Math.Max(38, Height / 2) - 10));
-            double min = trend[0];
-            double max = trend[0];
-            for (int i = 1; i < trend.Count; i++)
-            {
-                if (trend[i] < min) min = trend[i];
-                if (trend[i] > max) max = trend[i];
-            }
-            if (max - min < 1.0)
-            {
-                double mid = (max + min) / 2.0;
-                min = mid - 0.5;
-                max = mid + 0.5;
-            }
-
-            PointF[] points = new PointF[trend.Count];
+            var rect = new Rectangle(12, Math.Max(42, Height / 2), Math.Max(10, Width - 24), Math.Max(24, Height - Math.Max(46, Height / 2) - 20));
+            DateTime now = DateTime.Now;
+            TimeSpan displayWindow = GetDisplayWindow(now);
+            DateTime windowStart = now - displayWindow;
+            double maxValue = 0;
+            bool hasValue = false;
             for (int i = 0; i < trend.Count; i++)
             {
-                float x = rect.Left + (float)i * rect.Width / Math.Max(1, trend.Count - 1);
-                double normalized = (trend[i] - min) / (max - min);
+                if (trend[i].Time < windowStart || trend[i].Time > now) continue;
+                hasValue = true;
+                if (trend[i].Value > maxValue) maxValue = trend[i].Value;
+            }
+            if (!hasValue) return;
+
+            double min = 0;
+            double max = NicePowerMax(maxValue);
+            double totalSeconds = Math.Max(1.0, (now - windowStart).TotalSeconds);
+            int step = Math.Max(1, trend.Count / Math.Max(1, rect.Width * 2));
+            var points = new List<PointF>();
+
+            for (int i = 0; i < trend.Count; i += step)
+            {
+                PowerTrendPoint point = trend[i];
+                if (point.Time < windowStart || point.Time > now) continue;
+                double age = (now - point.Time).TotalSeconds;
+                float x = rect.Left + (float)(age / totalSeconds * rect.Width);
+                double normalized = (point.Value - min) / (max - min);
                 normalized = Math.Max(0, Math.Min(1, normalized));
                 float y = rect.Bottom - (float)(normalized * rect.Height);
-                points[i] = new PointF(x, y);
+                points.Add(new PointF(x, y));
             }
+            if (points.Count < 2) return;
 
             using (var gridPen = new Pen(Color.FromArgb(235, 218, 218)))
             using (var trendPen = new Pen(Color.FromArgb(196, 68, 62), 2F))
             using (var brush = new SolidBrush(Color.FromArgb(145, 84, 84)))
             {
                 g.DrawLine(gridPen, rect.Left, rect.Bottom, rect.Right, rect.Bottom);
-                g.DrawLines(trendPen, points);
-                string range = min.ToString("0.0", CultureInfo.InvariantCulture) + "~" + max.ToString("0.0", CultureInfo.InvariantCulture) + "W";
+                for (int i = 0; i <= 4; i++)
+                {
+                    int x = rect.Left + rect.Width * i / 4;
+                    g.DrawLine(gridPen, x, rect.Top, x, rect.Bottom);
+                    string label = FormatTimeLabel(i, displayWindow);
+                    using (var font = new Font("Segoe UI", 7F, FontStyle.Regular))
+                    {
+                        SizeF size = g.MeasureString(label, font);
+                        g.DrawString(label, font, brush, x - size.Width / 2, rect.Bottom + 3);
+                    }
+                }
+                g.DrawLines(trendPen, points.ToArray());
+                string range = "W 0~" + max.ToString("0", CultureInfo.InvariantCulture);
                 using (var font = new Font("Segoe UI", 7.5F, FontStyle.Bold))
                 {
                     g.DrawString(range, font, brush, rect.Left, rect.Top - 14);
                 }
             }
+        }
+
+        private TimeSpan GetDisplayWindow(DateTime now)
+        {
+            if (trend.Count == 0) return TimeSpan.FromSeconds(60);
+            TimeSpan elapsed = now - trend[0].Time;
+            if (elapsed <= TimeSpan.Zero) return TimeSpan.FromSeconds(10);
+            double targetSeconds = elapsed.TotalSeconds * 1.08;
+            targetSeconds = Math.Max(10.0, Math.Min(RawWindow.TotalSeconds, targetSeconds));
+            return TimeSpan.FromSeconds(targetSeconds);
+        }
+
+        private static double NicePowerMax(double maxValue)
+        {
+            double padded = Math.Max(0.5, maxValue * 1.12);
+            double[] limits = new double[] { 5, 10, 20, 50, 100, 150 };
+            for (int i = 0; i < limits.Length; i++)
+            {
+                if (padded <= limits[i]) return limits[i];
+            }
+            return 150;
+        }
+
+        private static string FormatTimeLabel(int index, TimeSpan displayWindow)
+        {
+            if (index <= 0) return "now";
+            double seconds = displayWindow.TotalSeconds * index / 4.0;
+            return "-" + FormatDuration(seconds);
+        }
+
+        private static string FormatDuration(double seconds)
+        {
+            if (seconds < 90)
+            {
+                return Math.Max(1, (int)Math.Round(seconds)).ToString(CultureInfo.InvariantCulture) + "s";
+            }
+            double minutes = seconds / 60.0;
+            if (minutes < 10)
+            {
+                double rounded = Math.Round(minutes, 1);
+                if (Math.Abs(rounded - Math.Round(rounded)) < 0.05)
+                    return Math.Round(rounded).ToString("0", CultureInfo.InvariantCulture) + "m";
+                return rounded.ToString("0.0", CultureInfo.InvariantCulture) + "m";
+            }
+            return Math.Round(minutes).ToString("0", CultureInfo.InvariantCulture) + "m";
+        }
+
+        private sealed class PowerTrendPoint
+        {
+            public DateTime Time;
+            public double Value;
         }
     }
 
@@ -2077,6 +2298,7 @@ namespace SK150CControl
         private string currentText = "--A";
         private bool hovering;
         private bool pressed;
+        private bool isActive;
 
         public QuickGroupButton()
         {
@@ -2098,6 +2320,17 @@ namespace SK150CControl
             voltageText = voltage;
             currentText = current;
             Invalidate();
+        }
+
+        public bool IsActive
+        {
+            get { return isActive; }
+            set
+            {
+                if (isActive == value) return;
+                isActive = value;
+                Invalidate();
+            }
         }
 
         protected override void OnMouseEnter(EventArgs e)
@@ -2137,9 +2370,29 @@ namespace SK150CControl
             base.OnPaint(e);
             e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
             var rect = new Rectangle(0, 0, Width - 1, Height - 1);
-            Color fill = pressed ? Color.FromArgb(226, 232, 240) : hovering ? Color.FromArgb(239, 246, 255) : BackColor;
+            Color fill;
+            Color border;
+            Color groupColor;
+            Color voltageColor;
+            Color currentColor;
+            if (isActive)
+            {
+                fill = pressed ? Color.FromArgb(27, 95, 70) : hovering ? Color.FromArgb(33, 112, 82) : Color.FromArgb(35, 105, 77);
+                border = Color.FromArgb(24, 83, 62);
+                groupColor = Color.White;
+                voltageColor = Color.FromArgb(204, 255, 226);
+                currentColor = Color.FromArgb(255, 239, 170);
+            }
+            else
+            {
+                fill = pressed ? Color.FromArgb(226, 232, 240) : hovering ? Color.FromArgb(239, 246, 255) : BackColor;
+                border = hovering ? Color.FromArgb(66, 153, 225) : Color.FromArgb(184, 194, 204);
+                groupColor = Color.FromArgb(24, 30, 38);
+                voltageColor = VoltageColor;
+                currentColor = CurrentColor;
+            }
             using (var brush = new SolidBrush(fill))
-            using (var borderPen = new Pen(hovering ? Color.FromArgb(66, 153, 225) : Color.FromArgb(184, 194, 204)))
+            using (var borderPen = new Pen(border))
             {
                 e.Graphics.FillRectangle(brush, rect);
                 e.Graphics.DrawRectangle(borderPen, rect);
@@ -2151,9 +2404,9 @@ namespace SK150CControl
 
             using (var groupFont = FitFont(e.Graphics, "M" + group.ToString(CultureInfo.InvariantCulture), 12F, FontStyle.Bold, leftRect.Size))
             using (var valueFont = FitFont(e.Graphics, voltageText.Length >= currentText.Length ? voltageText : currentText, 10F, FontStyle.Bold, rightTop.Size))
-            using (var groupBrush = new SolidBrush(Color.FromArgb(24, 30, 38)))
-            using (var voltageBrush = new SolidBrush(VoltageColor))
-            using (var currentBrush = new SolidBrush(CurrentColor))
+            using (var groupBrush = new SolidBrush(groupColor))
+            using (var voltageBrush = new SolidBrush(voltageColor))
+            using (var currentBrush = new SolidBrush(currentColor))
             {
                 DrawText(e.Graphics, "M" + group.ToString(CultureInfo.InvariantCulture), groupFont, groupBrush, leftRect, ContentAlignment.MiddleCenter);
                 DrawText(e.Graphics, voltageText, valueFont, voltageBrush, rightTop, ContentAlignment.MiddleRight);
@@ -2471,10 +2724,10 @@ namespace SK150CControl
                 {
                     int y = rect.Top + rect.Height * i / 5;
                     e.Graphics.DrawLine(pen, rect.Left, y, rect.Right, y);
-                    double leftValue = vMax - (vMax - vMin) * i / 5.0;
-                    double rightValue = iMax - (iMax - iMin) * i / 5.0;
-                    string left = leftValue.ToString("0.00", CultureInfo.InvariantCulture);
-                    string right = rightValue.ToString("0.000", CultureInfo.InvariantCulture);
+                    double leftValue = iMax - (iMax - iMin) * i / 5.0;
+                    double rightValue = vMax - (vMax - vMin) * i / 5.0;
+                    string left = leftValue.ToString("0.000", CultureInfo.InvariantCulture);
+                    string right = rightValue.ToString("0.00", CultureInfo.InvariantCulture);
                     SizeF leftSize = e.Graphics.MeasureString(left, Font);
                     e.Graphics.DrawString(left, Font, textBrush, rect.Left - leftSize.Width - 8, y - leftSize.Height / 2);
                     e.Graphics.DrawString(right, Font, textBrush, rect.Right + 8, y - leftSize.Height / 2);
@@ -2482,26 +2735,28 @@ namespace SK150CControl
                 for (int i = 0; i <= 4; i++)
                 {
                     int x = rect.Left + rect.Width * i / 4;
+                    e.Graphics.DrawLine(pen, x, rect.Top, x, rect.Bottom);
                     e.Graphics.DrawLine(pen, x, rect.Bottom, x, rect.Bottom + 4);
                     string label = FormatTimeLabel(i, displayWindow);
                     SizeF size = e.Graphics.MeasureString(label, Font);
                     e.Graphics.DrawString(label, Font, textBrush, x - size.Width / 2, rect.Bottom + 8);
                 }
                 e.Graphics.DrawString("歷史曲線", titleFont, textBrush, 12, 8);
-                e.Graphics.DrawString("左軸: V", Font, textBrush, rect.Left, 16);
-                e.Graphics.DrawString("右軸: A", Font, textBrush, rect.Right - 48, 16);
+                e.Graphics.DrawString("左軸: A", Font, textBrush, rect.Left, 16);
+                e.Graphics.DrawString("右軸: V", Font, textBrush, rect.Right - 48, 16);
                 using (var vBrush = new SolidBrush(VoltageColor))
                 using (var iBrush = new SolidBrush(CurrentColor))
                 {
-                    e.Graphics.DrawString("VOUT", Font, vBrush, rect.Left, Height - 30);
-                    e.Graphics.DrawString("IOUT", Font, iBrush, rect.Left + 70, Height - 30);
-                    e.Graphics.DrawString("V " + vMin.ToString("0.00", CultureInfo.InvariantCulture) + "~" + vMax.ToString("0.00", CultureInfo.InvariantCulture), Font, vBrush, rect.Left + 140, Height - 30);
-                    e.Graphics.DrawString("A " + iMin.ToString("0.000", CultureInfo.InvariantCulture) + "~" + iMax.ToString("0.000", CultureInfo.InvariantCulture), Font, iBrush, rect.Left + 300, Height - 30);
+                    e.Graphics.DrawString("IOUT", Font, iBrush, rect.Left, Height - 30);
+                    e.Graphics.DrawString("VOUT", Font, vBrush, rect.Left + 70, Height - 30);
+                    e.Graphics.DrawString("A " + iMin.ToString("0.000", CultureInfo.InvariantCulture) + "~" + iMax.ToString("0.000", CultureInfo.InvariantCulture), Font, iBrush, rect.Left + 140, Height - 30);
+                    e.Graphics.DrawString("V " + vMin.ToString("0.00", CultureInfo.InvariantCulture) + "~" + vMax.ToString("0.00", CultureInfo.InvariantCulture), Font, vBrush, rect.Left + 300, Height - 30);
                 }
             }
 
-            DrawSeries(e.Graphics, rect, rawPoints, windowStart, now, vMin, vMax, VoltageColor, true);
-            DrawSeries(e.Graphics, rect, rawPoints, windowStart, now, iMin, iMax, CurrentColor, false);
+            PointF? vHead = DrawSeries(e.Graphics, rect, rawPoints, windowStart, now, vMin, vMax, VoltageColor, true);
+            PointF? iHead = DrawSeries(e.Graphics, rect, rawPoints, windowStart, now, iMin, iMax, CurrentColor, false);
+            DrawHeadLabels(e.Graphics, rect, vHead, iHead);
         }
 
         private TimeSpan GetDisplayWindow(DateTime now)
@@ -2509,23 +2764,15 @@ namespace SK150CControl
             if (rawPoints.Count == 0) return TimeSpan.FromSeconds(60);
             TimeSpan elapsed = now - rawPoints[0].Time;
             if (elapsed <= TimeSpan.Zero) return TimeSpan.FromSeconds(10);
-            if (elapsed > RawWindow) return RawWindow;
             double targetSeconds = elapsed.TotalSeconds * 1.08;
-            if (targetSeconds <= 10) return TimeSpan.FromSeconds(10);
-            if (targetSeconds <= 30) return TimeSpan.FromSeconds(30);
-            if (targetSeconds <= 60) return TimeSpan.FromSeconds(60);
-            if (targetSeconds <= 120) return TimeSpan.FromMinutes(2);
-            if (targetSeconds <= 300) return TimeSpan.FromMinutes(5);
-            if (targetSeconds <= 600) return TimeSpan.FromMinutes(10);
-            if (targetSeconds <= 900) return TimeSpan.FromMinutes(15);
-            if (targetSeconds <= 1800) return TimeSpan.FromMinutes(30);
-            return RawWindow;
+            targetSeconds = Math.Max(10.0, Math.Min(RawWindow.TotalSeconds, targetSeconds));
+            return TimeSpan.FromSeconds(targetSeconds);
         }
 
         private static string FormatTimeLabel(int index, TimeSpan displayWindow)
         {
-            if (index >= 4) return "now";
-            double seconds = displayWindow.TotalSeconds * (4 - index) / 4.0;
+            if (index <= 0) return "now";
+            double seconds = displayWindow.TotalSeconds * index / 4.0;
             return "-" + FormatDuration(seconds);
         }
 
@@ -2583,29 +2830,118 @@ namespace SK150CControl
             }
         }
 
-        private static void DrawSeries(Graphics g, Rectangle rect, List<RawPoint> data, DateTime windowStart, DateTime windowEnd, double min, double max, Color color, bool voltage)
+        private static PointF? DrawSeries(Graphics g, Rectangle rect, List<RawPoint> data, DateTime windowStart, DateTime windowEnd, double min, double max, Color color, bool voltage)
         {
-            if (data.Count < 2) return;
+            if (data.Count < 2) return null;
             double totalSeconds = Math.Max(1.0, (windowEnd - windowStart).TotalSeconds);
             int step = Math.Max(1, data.Count / Math.Max(1, rect.Width * 2));
             var points = new List<PointF>();
+            PointF? newest = null;
+            DateTime newestTime = DateTime.MinValue;
             for (int i = 0; i < data.Count; i += step)
             {
                 RawPoint point = data[i];
                 if (point.Time < windowStart || point.Time > windowEnd) continue;
-                double elapsed = (point.Time - windowStart).TotalSeconds;
-                float x = rect.Left + (float)(elapsed / totalSeconds * rect.Width);
+                double age = (windowEnd - point.Time).TotalSeconds;
+                float x = rect.Left + (float)(age / totalSeconds * rect.Width);
                 double value = voltage ? point.Voltage : point.Current;
                 double normalized = (value - min) / (max - min);
                 normalized = Math.Max(0, Math.Min(1, normalized));
                 float y = rect.Bottom - (float)(normalized * rect.Height);
-                points.Add(new PointF(x, y));
+                var plotted = new PointF(x, y);
+                points.Add(plotted);
+                if (point.Time > newestTime)
+                {
+                    newestTime = point.Time;
+                    newest = plotted;
+                }
             }
-            if (points.Count < 2) return;
+            if (points.Count < 2) return newest;
             using (var pen = new Pen(color, 2F))
             {
                 g.DrawLines(pen, points.ToArray());
             }
+            return newest;
+        }
+
+        private void DrawHeadLabels(Graphics g, Rectangle rect, PointF? voltageHead, PointF? currentHead)
+        {
+            if (rawPoints.Count == 0) return;
+            RawPoint latest = rawPoints[rawPoints.Count - 1];
+            using (var labelFont = new Font("Segoe UI", 20F, FontStyle.Bold))
+            {
+                RectangleF? vBox = null;
+                RectangleF? iBox = null;
+                if (voltageHead.HasValue)
+                {
+                    string text = "V " + latest.Voltage.ToString("0.00", CultureInfo.InvariantCulture) + "V";
+                    vBox = MeasureLabelBox(g, labelFont, text, voltageHead.Value, rect, true);
+                }
+                if (currentHead.HasValue)
+                {
+                    string text = "A " + latest.Current.ToString("0.000", CultureInfo.InvariantCulture) + "A";
+                    iBox = MeasureLabelBox(g, labelFont, text, currentHead.Value, rect, false);
+                }
+
+                if (vBox.HasValue && iBox.HasValue && vBox.Value.IntersectsWith(iBox.Value))
+                {
+                    RectangleF vb = vBox.Value;
+                    RectangleF ib = iBox.Value;
+                    vb.Y = Clamp(rect.Top + 4, vb.Y - vb.Height / 2 - 4, rect.Bottom - vb.Height - 4);
+                    ib.Y = Clamp(rect.Top + 4, ib.Y + ib.Height / 2 + 4, rect.Bottom - ib.Height - 4);
+                    if (vb.IntersectsWith(ib))
+                    {
+                        vb.Y = rect.Top + 6;
+                        ib.Y = rect.Bottom - ib.Height - 6;
+                    }
+                    vBox = vb;
+                    iBox = ib;
+                }
+
+                if (vBox.HasValue)
+                {
+                    string text = "V " + latest.Voltage.ToString("0.00", CultureInfo.InvariantCulture) + "V";
+                    DrawLabelBox(g, vBox.Value, text, labelFont, VoltageColor);
+                }
+                if (iBox.HasValue)
+                {
+                    string text = "A " + latest.Current.ToString("0.000", CultureInfo.InvariantCulture) + "A";
+                    DrawLabelBox(g, iBox.Value, text, labelFont, CurrentColor);
+                }
+            }
+        }
+
+        private static RectangleF MeasureLabelBox(Graphics g, Font font, string text, PointF head, Rectangle rect, bool voltage)
+        {
+            SizeF size = g.MeasureString(text, font);
+            float width = size.Width + 16F;
+            float height = size.Height + 8F;
+            float x = head.X + 10F;
+            if (x + width > rect.Right - 4) x = rect.Right - width - 4;
+            if (x < rect.Left + 4) x = rect.Left + 4;
+
+            float y = voltage ? head.Y + 6F : head.Y - height - 6F;
+            y = Clamp(rect.Top + 4, y, rect.Bottom - height - 4);
+            return new RectangleF(x, y, width, height);
+        }
+
+        private static void DrawLabelBox(Graphics g, RectangleF box, string text, Font font, Color color)
+        {
+            using (var back = new SolidBrush(Color.FromArgb(235, 255, 255, 255)))
+            using (var border = new Pen(Color.FromArgb(180, color), 1.5F))
+            using (var textBrush = new SolidBrush(color))
+            {
+                g.FillRectangle(back, box);
+                g.DrawRectangle(border, box.X, box.Y, box.Width, box.Height);
+                g.DrawString(text, font, textBrush, box.X + 8F, box.Y + 3F);
+            }
+        }
+
+        private static float Clamp(float min, float value, float max)
+        {
+            if (value < min) return min;
+            if (value > max) return max;
+            return value;
         }
 
         private void PruneRaw(DateTime now)

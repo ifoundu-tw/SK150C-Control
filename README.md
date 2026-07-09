@@ -4,7 +4,7 @@ SK150C Modbus RTU control panel prototype for Windows.
 
 ## Download
 
-- [SK150C_Control_v32.exe](release/SK150C_Control_v32.exe)
+- [SK150C_Control_v39.exe](release/SK150C_Control_v39.exe)
 - [Release notes](release/SK150C_Control_README.txt)
 
 ## Product Guide

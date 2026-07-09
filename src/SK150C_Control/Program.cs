@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Globalization;
 using System.IO.Ports;
 using System.Linq;
+using Microsoft.Win32;
 using System.Reflection;
 using System.Text;
 using System.Threading;
@@ -24,8 +25,12 @@ namespace SK150CControl
 
     public sealed class MainForm : Form
     {
-        private const string VersionName = "SK150C_Control_v32";
+        private const string VersionName = "SK150C_Control_v39";
         private const int MaxLogLines = 2000;
+        private const string RegistryBasePath = @"Software\SK150C_Control";
+        private static readonly TimeSpan FullChargeStartDelay = TimeSpan.FromSeconds(10);
+        private static readonly TimeSpan FullChargeLowCurrentDelay = TimeSpan.FromSeconds(5);
+        private static readonly TimeSpan FullChargeVoltageOffSettle = TimeSpan.FromSeconds(5);
         private static readonly Color VoltageColor = Color.FromArgb(36, 150, 96);
         private static readonly Color CurrentColor = Color.FromArgb(184, 134, 11);
         private static readonly Color PowerColor = Color.FromArgb(196, 68, 62);
@@ -64,6 +69,9 @@ namespace SK150CControl
         private readonly StepEditor setOvpBox = new StepEditor(0.50M, 42.00M, 42.00M, 2, "V", 1.00M, 0.10M, VoltageColor);
         private readonly StepEditor setOcpBox = new StepEditor(0.001M, 8.200M, 8.200M, 3, "A", 1.000M, 0.100M, CurrentColor);
         private readonly StepEditor setOppBox = new StepEditor(0.0M, 160.0M, 160.0M, 1, "W", 10.0M, 1.0M, PowerColor);
+        private readonly StepEditor fullChargeCurrentBox = new StepEditor(0.001M, 8.000M, 0.100M, 3, "A", 0.100M, 0.010M, CurrentColor);
+        private readonly StepEditor fullChargeVoltageTargetBox = new StepEditor(0.50M, 40.00M, 12.00M, 2, "V", 1.00M, 0.10M, VoltageColor);
+        private readonly StepEditor fullChargeVoltagePollBox = new StepEditor(5M, 3600M, 60M, 0, "s", 60M, 10M, Color.FromArgb(31, 38, 46));
         private readonly ComboBox backlightBox = new ComboBox();
         private readonly NumericUpDown sleepBox = new NumericUpDown();
         private readonly CheckBox buzzerBox = new CheckBox();
@@ -78,10 +86,19 @@ namespace SK150CControl
         private readonly Button writeOvpButton = new Button();
         private readonly Button writeOcpButton = new Button();
         private readonly Button writeOppButton = new Button();
+        private readonly Button applyFullChargeCurrentButton = new Button();
+        private readonly Button applyFullChargeVoltageButton = new Button();
+        private readonly Button applyFullChargeVoltagePollButton = new Button();
+        private readonly Button fullChargeCurrentToggleButton = new Button();
+        private readonly Button fullChargeVoltageToggleButton = new Button();
         private readonly Button outputOnButton = new Button();
         private readonly Button outputOffButton = new Button();
         private readonly Button clearLogButton = new Button();
         private readonly Button refreshQuickGroupsButton = new Button();
+        private readonly CheckBox fullChargeCurrentEnableBox = new CheckBox();
+        private readonly CheckBox fullChargeVoltageEnableBox = new CheckBox();
+        private readonly Label fullChargeCurrentStatusLabel = new Label();
+        private readonly Label fullChargeVoltageStatusLabel = new Label();
         private readonly Label editGroupLabel = new Label();
         private readonly Dictionary<StepEditor, Panel> parameterBlocks = new Dictionary<StepEditor, Panel>();
         private readonly Dictionary<int, QuickGroupButton> quickGroupButtons = new Dictionary<int, QuickGroupButton>();
@@ -115,7 +132,21 @@ namespace SK150CControl
         private int logLineCount;
         private int currentProtectCode;
         private bool syncingOptions;
+        private bool syncingFullChargeSettings;
         private bool startupAutoConnectAttempted;
+        private double latestVout;
+        private double latestIout;
+        private bool latestOutputOn;
+        private DateTime? outputOnSince;
+        private DateTime? lowCurrentSince;
+        private DateTime? nextVoltageCheckAt;
+        private DateTime? voltageOffConfirmedAt;
+        private bool autoOffInProgress;
+        private bool voltageCheckInProgress;
+        private bool voltageOffCommandPending;
+        private bool voltageReadPending;
+        private bool voltageRestoreOnPending;
+        private decimal voltageRestorePollSeconds;
 
         public MainForm()
         {
@@ -147,7 +178,7 @@ namespace SK150CControl
             root.RowCount = 3;
             root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 250));
             root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 300));
+            root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 310));
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 190));
@@ -468,9 +499,9 @@ namespace SK150CControl
         private Control BuildRightPanel()
         {
             var panel = Box("輸出控制");
-            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Padding = new Padding(0, 0, 0, 0) };
+            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Padding = new Padding(0, 34, 0, 0) };
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 92));
             panel.Controls.Add(layout);
             quickInputBox.Text = "快速輸入";
             quickInputBox.Checked = true;
@@ -486,18 +517,17 @@ namespace SK150CControl
             quickInputBox.BringToFront();
             ApplyQuickInputMode();
 
-            var scrollHost = new Panel { Dock = DockStyle.Fill, AutoScroll = true, Padding = new Padding(0) };
-            var flow = new FlowLayoutPanel
-            {
-                Dock = DockStyle.Top,
-                AutoSize = true,
-                AutoSizeMode = AutoSizeMode.GrowAndShrink,
-                FlowDirection = FlowDirection.TopDown,
-                WrapContents = false,
-                Padding = new Padding(12, 32, 12, 12)
-            };
-            scrollHost.Controls.Add(flow);
-            layout.Controls.Add(scrollHost, 0, 0);
+            var tabs = new TabControl { Dock = DockStyle.Fill, Padding = new Point(8, 4) };
+            var commonTab = new TabPage("常用") { BackColor = Color.White, Padding = new Padding(0) };
+            var advancedTab = new TabPage("進階") { BackColor = Color.White, Padding = new Padding(0) };
+            tabs.TabPages.Add(commonTab);
+            tabs.TabPages.Add(advancedTab);
+            layout.Controls.Add(tabs, 0, 0);
+
+            var commonFlow = BuildRightFlow();
+            var advancedFlow = BuildRightFlow();
+            commonTab.Controls.Add(BuildScrollHost(commonFlow));
+            advancedTab.Controls.Add(BuildScrollHost(advancedFlow));
 
             writeVoltageButton.Text = "寫入電壓";
             writeVoltageButton.Click += delegate
@@ -509,7 +539,7 @@ namespace SK150CControl
                         UpdateTrendTargetsFromEditors();
                     });
             };
-            flow.Controls.Add(BuildParameterBlock("設定電壓", setVoltageBox, writeVoltageButton));
+            commonFlow.Controls.Add(BuildParameterBlock("設定電壓", setVoltageBox, writeVoltageButton));
 
             writeCurrentButton.Text = "寫入電流";
             writeCurrentButton.Click += delegate
@@ -521,73 +551,346 @@ namespace SK150CControl
                         UpdateTrendTargetsFromEditors();
                     });
             };
-            flow.Controls.Add(BuildParameterBlock("設定電流", setCurrentBox, writeCurrentButton));
-
-            writeLvpButton.Text = "寫入 LVP";
-            writeLvpButton.Click += delegate
-            {
-                QueueVerifiedWrite(CurrentGroupBase() + 2, (int)Math.Round((double)setLvpBox.Value * 100.0), "設定 LVP M" + currentGroup, setLvpBox);
-            };
-            flow.Controls.Add(BuildParameterBlock("LVP 低壓保護", setLvpBox, writeLvpButton));
+            commonFlow.Controls.Add(BuildParameterBlock("設定電流", setCurrentBox, writeCurrentButton));
 
             writeOvpButton.Text = "寫入 OVP";
             writeOvpButton.Click += delegate
             {
                 QueueVerifiedWrite(CurrentGroupBase() + 3, (int)Math.Round((double)setOvpBox.Value * 100.0), "設定 OVP M" + currentGroup, setOvpBox);
             };
-            flow.Controls.Add(BuildParameterBlock("OVP 過壓保護", setOvpBox, writeOvpButton));
+            commonFlow.Controls.Add(BuildParameterBlock("OVP 過壓保護", setOvpBox, writeOvpButton));
 
             writeOcpButton.Text = "寫入 OCP";
             writeOcpButton.Click += delegate
             {
                 QueueVerifiedWrite(CurrentGroupBase() + 4, (int)Math.Round((double)setOcpBox.Value * 1000.0), "設定 OCP M" + currentGroup, setOcpBox);
             };
-            flow.Controls.Add(BuildParameterBlock("OCP 過流保護", setOcpBox, writeOcpButton));
+            commonFlow.Controls.Add(BuildParameterBlock("OCP 過流保護", setOcpBox, writeOcpButton));
+
+            commonFlow.Controls.Add(BuildFullChargePanel());
+
+            writeLvpButton.Text = "寫入 LVP";
+            writeLvpButton.Click += delegate
+            {
+                QueueVerifiedWrite(CurrentGroupBase() + 2, (int)Math.Round((double)setLvpBox.Value * 100.0), "設定 LVP M" + currentGroup, setLvpBox);
+            };
+            advancedFlow.Controls.Add(BuildParameterBlock("LVP 低壓保護", setLvpBox, writeLvpButton));
 
             writeOppButton.Text = "寫入 OPP";
             writeOppButton.Click += delegate
             {
                 QueueVerifiedWrite(CurrentGroupBase() + 5, (int)Math.Round((double)setOppBox.Value * 10.0), "設定 OPP M" + currentGroup, setOppBox);
             };
-            flow.Controls.Add(BuildParameterBlock("OPP 過功率保護", setOppBox, writeOppButton));
+            advancedFlow.Controls.Add(BuildParameterBlock("OPP 過功率保護", setOppBox, writeOppButton));
+            BindEnterToWriteButtons();
 
-            flow.Controls.Add(SectionText("輸出開關"));
-            var onOff = new FlowLayoutPanel { Width = 250, Height = 42, FlowDirection = FlowDirection.LeftToRight, Margin = new Padding(0, 0, 0, 8) };
-            outputOnButton.Text = "ON";
-            outputOffButton.Text = "OFF";
-            outputOnButton.Width = outputOffButton.Width = 96;
-            outputOnButton.Height = outputOffButton.Height = 38;
-            outputOnButton.BackColor = Color.FromArgb(65, 145, 108);
-            outputOnButton.ForeColor = Color.White;
-            outputOffButton.BackColor = Color.FromArgb(172, 79, 82);
-            outputOffButton.ForeColor = Color.White;
-            outputOnButton.Click += delegate { QueueWriteRegister(0x0012, 1, "輸出 ON"); };
-            outputOffButton.Click += delegate { QueueWriteRegister(0x0012, 0, "輸出 OFF"); };
-            onOff.Controls.Add(outputOnButton);
-            onOff.Controls.Add(outputOffButton);
-            flow.Controls.Add(onOff);
-
-            var quick = new TableLayoutPanel { Width = 250, Height = 258, ColumnCount = 2, RowCount = 6, Margin = new Padding(0, 0, 0, 8) };
+            var quick = new TableLayoutPanel { Width = 260, Height = 228, ColumnCount = 2, RowCount = 6, Margin = new Padding(0, 0, 0, 4) };
             quick.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
             quick.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
             for (int r = 0; r < 6; r++) quick.RowStyles.Add(new RowStyle(SizeType.Percent, 16.666F));
-            flow.Controls.Add(SectionText("快捷組"));
+            commonFlow.Controls.Add(SectionText("快捷組"));
             for (int i = 0; i <= 10; i++)
             {
                 int column = i <= 5 ? 0 : 1;
                 int row = i <= 5 ? i : i - 6;
                 quick.Controls.Add(BuildQuickGroupPair(i), column, row);
             }
-            flow.Controls.Add(quick);
+            commonFlow.Controls.Add(quick);
 
-            layout.Controls.Add(BuildGroupStatusPanel(), 0, 1);
+            layout.Controls.Add(BuildRightFooterPanel(), 0, 1);
+            LoadFullChargeSettings(currentGroup);
             return panel;
         }
 
-        private Control BuildGroupStatusPanel()
+        private static FlowLayoutPanel BuildRightFlow()
         {
-            var panel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 1, Padding = new Padding(12, 4, 20, 8), BackColor = Color.White };
+            return new FlowLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                FlowDirection = FlowDirection.TopDown,
+                WrapContents = false,
+                Padding = new Padding(8, 8, 8, 8)
+            };
+        }
+
+        private static Control BuildScrollHost(Control content)
+        {
+            var scrollHost = new Panel { Dock = DockStyle.Fill, AutoScroll = false, Padding = new Padding(0), BackColor = Color.White };
+            scrollHost.Controls.Add(content);
+            return scrollHost;
+        }
+
+        private Control BuildFullChargePanel()
+        {
+            var flow = new FlowLayoutPanel
+            {
+                Width = 260,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                FlowDirection = FlowDirection.TopDown,
+                WrapContents = false,
+                Margin = new Padding(0, 0, 0, 4)
+            };
+
+            fullChargeCurrentBox.UseCompactInput();
+            fullChargeVoltageTargetBox.UseCompactInput();
+            fullChargeVoltagePollBox.UseCompactInput();
+
+            fullChargeCurrentEnableBox.CheckedChanged += delegate
+            {
+                if (!syncingFullChargeSettings) SaveFullChargeSettings();
+                StyleOnOffToggle(fullChargeCurrentToggleButton, fullChargeCurrentEnableBox.Checked);
+                UpdateFullChargeStatusLabels();
+            };
+
+            applyFullChargeCurrentButton.Text = "套用截止電流";
+            applyFullChargeCurrentButton.Click += delegate { SaveFullChargeSettings(); ClearDirty(fullChargeCurrentBox); };
+            fullChargeCurrentToggleButton.Click += delegate { fullChargeCurrentEnableBox.Checked = !fullChargeCurrentEnableBox.Checked; };
+            flow.Controls.Add(BuildFullChargeParameterBlock("滿電截止電流", fullChargeCurrentBox, applyFullChargeCurrentButton, fullChargeCurrentToggleButton));
+            flow.Controls.Add(BuildStatusLine(fullChargeCurrentStatusLabel));
+
+            fullChargeVoltageEnableBox.CheckedChanged += delegate
+            {
+                if (!syncingFullChargeSettings) SaveFullChargeSettings();
+                StyleOnOffToggle(fullChargeVoltageToggleButton, fullChargeVoltageEnableBox.Checked);
+                UpdateFullChargeStatusLabels();
+            };
+
+            applyFullChargeVoltageButton.Text = "套用電壓";
+            applyFullChargeVoltageButton.Click += delegate { SaveFullChargeSettings(); ClearDirty(fullChargeVoltageTargetBox); };
+            fullChargeVoltageToggleButton.Click += delegate { fullChargeVoltageEnableBox.Checked = !fullChargeVoltageEnableBox.Checked; };
+
+            applyFullChargeVoltagePollButton.Text = "套用";
+            applyFullChargeVoltagePollButton.Click += delegate { SaveFullChargeSettings(); ClearDirty(fullChargeVoltagePollBox); };
+            flow.Controls.Add(BuildFullChargeVoltageRow());
+            flow.Controls.Add(BuildStatusLine(fullChargeVoltageStatusLabel));
+            return flow;
+        }
+
+        private Control BuildFullChargeParameterBlock(string title, StepEditor editor, Button applyButton, Button toggleButton)
+        {
+            var block = new Panel { Width = 260, Height = 78, Margin = new Padding(0, 0, 0, 4), BackColor = Color.FromArgb(250, 251, 252) };
+            parameterBlocks[editor] = block;
+            editor.UserChanged += delegate { UpdateParameterBlockDirty(editor); };
+
+            var titleLabel = SectionText(title);
+            titleLabel.SetBounds(0, 0, 260, 20);
+            titleLabel.Dock = DockStyle.None;
+            editor.Dock = DockStyle.None;
+            editor.SetBounds(0, 21, 260, 26);
+
+            applyButton.SetBounds(0, 49, 196, 26);
+            toggleButton.SetBounds(202, 49, 58, 26);
+            applyButton.Anchor = AnchorStyles.Left | AnchorStyles.Top;
+            toggleButton.Anchor = AnchorStyles.Right | AnchorStyles.Top;
+            StyleOnOffToggle(toggleButton, false);
+
+            block.Controls.Add(titleLabel);
+            block.Controls.Add(editor);
+            block.Controls.Add(applyButton);
+            block.Controls.Add(toggleButton);
+            block.Resize += delegate
+            {
+                titleLabel.Width = block.Width;
+                editor.Width = block.Width;
+                applyButton.Width = Math.Max(110, block.Width - 64);
+                toggleButton.Left = block.Width - toggleButton.Width;
+            };
+            UpdateParameterBlockDirty(editor);
+            return block;
+        }
+
+        private Control BuildFullChargeVoltageRow()
+        {
+            var outer = new Panel { Width = 260, Height = 78, Margin = new Padding(0, 0, 0, 4), BackColor = Color.White };
+            var voltageBlock = new Panel { BackColor = Color.FromArgb(250, 251, 252) };
+            var pollBlock = new Panel { BackColor = Color.FromArgb(250, 251, 252) };
+            voltageBlock.SetBounds(0, 0, 172, 78);
+            pollBlock.SetBounds(180, 0, 80, 78);
+
+            parameterBlocks[fullChargeVoltageTargetBox] = voltageBlock;
+            parameterBlocks[fullChargeVoltagePollBox] = pollBlock;
+            fullChargeVoltageTargetBox.UserChanged += delegate { UpdateParameterBlockDirty(fullChargeVoltageTargetBox); };
+            fullChargeVoltagePollBox.UserChanged += delegate { UpdateParameterBlockDirty(fullChargeVoltagePollBox); };
+
+            var voltageTitle = SectionText("滿電截止電壓");
+            voltageTitle.SetBounds(0, 0, 172, 20);
+            voltageTitle.Dock = DockStyle.None;
+            fullChargeVoltageTargetBox.Dock = DockStyle.None;
+            fullChargeVoltageTargetBox.SetBounds(0, 21, 172, 26);
+            applyFullChargeVoltageButton.SetBounds(0, 49, 108, 26);
+            fullChargeVoltageToggleButton.SetBounds(114, 49, 58, 26);
+            StyleOnOffToggle(fullChargeVoltageToggleButton, false);
+
+            var pollTitle = SectionText("輪詢時間");
+            pollTitle.SetBounds(0, 0, 80, 20);
+            pollTitle.Dock = DockStyle.None;
+            fullChargeVoltagePollBox.Dock = DockStyle.None;
+            fullChargeVoltagePollBox.SetBounds(0, 21, 80, 26);
+            applyFullChargeVoltagePollButton.SetBounds(0, 49, 80, 26);
+
+            voltageBlock.Controls.Add(voltageTitle);
+            voltageBlock.Controls.Add(fullChargeVoltageTargetBox);
+            voltageBlock.Controls.Add(applyFullChargeVoltageButton);
+            voltageBlock.Controls.Add(fullChargeVoltageToggleButton);
+            pollBlock.Controls.Add(pollTitle);
+            pollBlock.Controls.Add(fullChargeVoltagePollBox);
+            pollBlock.Controls.Add(applyFullChargeVoltagePollButton);
+            outer.Controls.Add(voltageBlock);
+            outer.Controls.Add(pollBlock);
+            UpdateParameterBlockDirty(fullChargeVoltageTargetBox);
+            UpdateParameterBlockDirty(fullChargeVoltagePollBox);
+            return outer;
+        }
+
+        private static Control BuildStatusLine(Label label)
+        {
+            label.Width = 260;
+            label.Height = 22;
+            label.Margin = new Padding(0, 0, 0, 4);
+            label.TextAlign = ContentAlignment.MiddleLeft;
+            label.Font = new Font("Microsoft JhengHei UI", 8F, FontStyle.Bold);
+            label.ForeColor = Color.FromArgb(76, 86, 96);
+            label.BackColor = Color.FromArgb(245, 247, 249);
+            return label;
+        }
+
+        private string PresetRegistryPath(int group)
+        {
+            int safeGroup = Math.Max(0, Math.Min(10, group));
+            return RegistryBasePath + @"\Presets\M" + safeGroup.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private void LoadFullChargeSettings(int group)
+        {
+            syncingFullChargeSettings = true;
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(PresetRegistryPath(group)))
+                {
+                    bool currentEnabled = ReadRegistryBool(key, "FullChargeCutoffCurrentEnabled", false);
+                    decimal current = ReadRegistryDecimal(key, "FullChargeCutoffCurrent", 0.100M);
+                    bool voltageEnabled = ReadRegistryBool(key, "FullChargeCutoffVoltageEnabled", false);
+                    decimal voltage = ReadRegistryDecimal(key, "FullChargeTargetVoltage", setVoltageBox.Value);
+                    decimal pollSeconds = ReadRegistryDecimal(key, "FullChargeVoltagePollSeconds", 60M);
+
+                    fullChargeCurrentEnableBox.Checked = currentEnabled;
+                    fullChargeVoltageEnableBox.Checked = voltageEnabled;
+                    fullChargeCurrentBox.SetValue((double)current);
+                    fullChargeVoltageTargetBox.SetValue((double)voltage);
+                    fullChargeVoltagePollBox.SetValue((double)pollSeconds);
+                    ClearDirty(fullChargeCurrentBox);
+                    ClearDirty(fullChargeVoltageTargetBox);
+                    ClearDirty(fullChargeVoltagePollBox);
+                }
+            }
+            finally
+            {
+                syncingFullChargeSettings = false;
+            }
+            ResetFullChargeState();
+            UpdateFullChargeStatusLabels();
+        }
+
+        private void SaveFullChargeSettings()
+        {
+            using (RegistryKey key = Registry.CurrentUser.CreateSubKey(PresetRegistryPath(currentGroup)))
+            {
+                key.SetValue("FullChargeCutoffCurrentEnabled", fullChargeCurrentEnableBox.Checked ? 1 : 0, RegistryValueKind.DWord);
+                key.SetValue("FullChargeCutoffCurrent", fullChargeCurrentBox.Value.ToString("0.000", CultureInfo.InvariantCulture), RegistryValueKind.String);
+                key.SetValue("FullChargeCutoffVoltageEnabled", fullChargeVoltageEnableBox.Checked ? 1 : 0, RegistryValueKind.DWord);
+                key.SetValue("FullChargeTargetVoltage", fullChargeVoltageTargetBox.Value.ToString("0.00", CultureInfo.InvariantCulture), RegistryValueKind.String);
+                key.SetValue("FullChargeVoltagePollSeconds", fullChargeVoltagePollBox.Value.ToString("0", CultureInfo.InvariantCulture), RegistryValueKind.String);
+            }
+            UpdateFullChargeStatusLabels();
+        }
+
+        private static bool ReadRegistryBool(RegistryKey key, string name, bool fallback)
+        {
+            object value = key.GetValue(name);
+            if (value == null) return fallback;
+            int intValue;
+            if (int.TryParse(value.ToString(), out intValue)) return intValue != 0;
+            bool boolValue;
+            if (bool.TryParse(value.ToString(), out boolValue)) return boolValue;
+            return fallback;
+        }
+
+        private static decimal ReadRegistryDecimal(RegistryKey key, string name, decimal fallback)
+        {
+            object value = key.GetValue(name);
+            if (value == null) return fallback;
+            decimal parsed;
+            if (decimal.TryParse(value.ToString(), NumberStyles.Number, CultureInfo.InvariantCulture, out parsed)) return parsed;
+            if (decimal.TryParse(value.ToString(), NumberStyles.Number, CultureInfo.CurrentCulture, out parsed)) return parsed;
+            return fallback;
+        }
+
+        private void ResetFullChargeState()
+        {
+            outputOnSince = latestOutputOn ? (DateTime?)DateTime.Now : null;
+            lowCurrentSince = null;
+            nextVoltageCheckAt = latestOutputOn ? (DateTime?)DateTime.Now.AddSeconds((double)fullChargeVoltagePollBox.Value) : null;
+            voltageOffConfirmedAt = null;
+            autoOffInProgress = false;
+            voltageCheckInProgress = false;
+            voltageOffCommandPending = false;
+            voltageReadPending = false;
+            voltageRestoreOnPending = false;
+            voltageRestorePollSeconds = 0M;
+        }
+
+        private void BindEnterToWriteButtons()
+        {
+            setVoltageBox.EnterPressed += delegate { writeVoltageButton.PerformClick(); };
+            setCurrentBox.EnterPressed += delegate { writeCurrentButton.PerformClick(); };
+            setLvpBox.EnterPressed += delegate { writeLvpButton.PerformClick(); };
+            setOvpBox.EnterPressed += delegate { writeOvpButton.PerformClick(); };
+            setOcpBox.EnterPressed += delegate { writeOcpButton.PerformClick(); };
+            setOppBox.EnterPressed += delegate { writeOppButton.PerformClick(); };
+            fullChargeCurrentBox.EnterPressed += delegate { applyFullChargeCurrentButton.PerformClick(); };
+            fullChargeVoltageTargetBox.EnterPressed += delegate { applyFullChargeVoltageButton.PerformClick(); };
+            fullChargeVoltagePollBox.EnterPressed += delegate { applyFullChargeVoltagePollButton.PerformClick(); };
+        }
+
+        private Control BuildRightFooterPanel()
+        {
+            var panel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Padding = new Padding(12, 4, 20, 8), BackColor = Color.White };
+            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 42F));
             panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+
+            var outputRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, Margin = new Padding(0, 0, 0, 6) };
+            outputRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 78F));
+            outputRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+            outputRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+            var label = new Label
+            {
+                Text = "輸出開關",
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft,
+                ForeColor = Color.FromArgb(62, 70, 80),
+                Font = new Font("Microsoft JhengHei UI", 9F, FontStyle.Bold)
+            };
+
+            outputOnButton.Text = "ON";
+            outputOffButton.Text = "OFF";
+            outputOnButton.Dock = DockStyle.Fill;
+            outputOffButton.Dock = DockStyle.Fill;
+            outputOnButton.Margin = new Padding(0, 0, 4, 0);
+            outputOffButton.Margin = new Padding(4, 0, 0, 0);
+            outputOnButton.BackColor = Color.FromArgb(65, 145, 108);
+            outputOnButton.ForeColor = Color.White;
+            outputOffButton.BackColor = Color.FromArgb(172, 79, 82);
+            outputOffButton.ForeColor = Color.White;
+            outputOnButton.Font = outputOffButton.Font = new Font("Segoe UI", 9F, FontStyle.Bold);
+            outputOnButton.Click += delegate { QueueWriteRegister(0x0012, 1, "輸出 ON"); };
+            outputOffButton.Click += delegate { QueueWriteRegister(0x0012, 0, "輸出 OFF"); };
+            outputRow.Controls.Add(label, 0, 0);
+            outputRow.Controls.Add(outputOnButton, 1, 0);
+            outputRow.Controls.Add(outputOffButton, 2, 0);
+            panel.Controls.Add(outputRow, 0, 0);
 
             refreshQuickGroupsButton.Text = "刷新 M0-M10";
             refreshQuickGroupsButton.Dock = DockStyle.Fill;
@@ -596,8 +899,18 @@ namespace SK150CControl
             refreshQuickGroupsButton.BackColor = Color.FromArgb(241, 245, 249);
             refreshQuickGroupsButton.ForeColor = Color.FromArgb(31, 38, 46);
             refreshQuickGroupsButton.Click += delegate { RefreshQuickGroupSummary(); };
-            panel.Controls.Add(refreshQuickGroupsButton, 0, 0);
+            panel.Controls.Add(refreshQuickGroupsButton, 0, 1);
             return panel;
+        }
+
+        private static void StyleOnOffToggle(Button button, bool enabled)
+        {
+            button.Text = enabled ? "ON" : "OFF";
+            button.BackColor = enabled ? Color.FromArgb(35, 96, 73) : Color.FromArgb(226, 232, 240);
+            button.ForeColor = enabled ? Color.White : Color.FromArgb(31, 38, 46);
+            button.Font = new Font("Segoe UI", 9F, FontStyle.Bold);
+            button.FlatStyle = FlatStyle.Flat;
+            button.FlatAppearance.BorderColor = enabled ? Color.FromArgb(23, 78, 57) : Color.FromArgb(190, 199, 208);
         }
 
         private static void SetupStatusBadge(Label label, string text, Color backColor, float fontSize)
@@ -613,15 +926,15 @@ namespace SK150CControl
 
         private Control BuildParameterBlock(string title, StepEditor editor, Button writeButton)
         {
-            var block = new Panel { Width = 250, Height = 94, Margin = new Padding(0, 0, 0, 8), BackColor = Color.FromArgb(250, 251, 252) };
+            var block = new Panel { Width = 260, Height = 80, Margin = new Padding(0, 0, 0, 4), BackColor = Color.FromArgb(250, 251, 252) };
             parameterBlocks[editor] = block;
             editor.UserChanged += delegate { UpdateParameterBlockDirty(editor); };
             var titleLabel = SectionText(title);
-            titleLabel.SetBounds(0, 0, 250, 22);
+            titleLabel.SetBounds(0, 0, 260, 20);
             titleLabel.Dock = DockStyle.None;
             editor.Dock = DockStyle.None;
-            editor.SetBounds(0, 24, 250, 38);
-            writeButton.SetBounds(0, 64, 250, 28);
+            editor.SetBounds(0, 21, 260, 32);
+            writeButton.SetBounds(0, 55, 260, 24);
             writeButton.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
             block.Controls.Add(titleLabel);
             block.Controls.Add(editor);
@@ -777,6 +1090,7 @@ namespace SK150CControl
 
                     if (response != null)
                     {
+                        ExecuteVoltageAutomationWritesAtPollEnd();
                         SyncProtectionFromGroup();
                         pollCounter++;
                         if (pollCounter % 5 == 0) SyncDeviceOptions();
@@ -832,6 +1146,7 @@ namespace SK150CControl
                         BeginInvoke((Action)(() =>
                         {
                             SetActiveQuickGroup(group);
+                            LoadFullChargeSettings(group);
                             SetStatusText("已調用 M" + group + " 並同步");
                         }));
                     }
@@ -1378,6 +1693,8 @@ namespace SK150CControl
 
         private void UpdateValues(double vout, double iout, double power)
         {
+            latestVout = vout;
+            latestIout = iout;
             voutTile.SetValue(vout, "0.00");
             ioutTile.SetValue(iout, "0.000");
             powerTile.SetValue(power, "0.00");
@@ -1467,6 +1784,20 @@ namespace SK150CControl
             temperatureTile.SetValue(temperature, "0.0");
             modeTile.SetText(cvcc == 1 ? "CC" : "CV");
             outputStateTile.SetText(onoff == 1 ? "ON" : "OFF");
+            bool wasOutputOn = latestOutputOn;
+            latestOutputOn = onoff == 1;
+            if (latestOutputOn && !wasOutputOn)
+            {
+                outputOnSince = DateTime.Now;
+                lowCurrentSince = null;
+                nextVoltageCheckAt = DateTime.Now.AddSeconds((double)fullChargeVoltagePollBox.Value);
+            }
+            else if (!latestOutputOn && wasOutputOn && !voltageCheckInProgress)
+            {
+                outputOnSince = null;
+                lowCurrentSince = null;
+                nextVoltageCheckAt = null;
+            }
             int previousProtectCode = currentProtectCode;
             currentProtectCode = protect;
             protectTile.SetText(ProtectText(protect));
@@ -1486,6 +1817,309 @@ namespace SK150CControl
             {
                 syncingOptions = false;
             }
+            EvaluateFullChargeAutomation();
+        }
+
+        private void EvaluateFullChargeAutomation()
+        {
+            DateTime now = DateTime.Now;
+            if (voltageCheckInProgress)
+            {
+                ContinueVoltageCutoffFlow(now);
+                if (fullChargeCurrentEnableBox.Checked) SetFullChargeCurrentStatus("電壓檢查中");
+                else SetFullChargeCurrentStatus("停用");
+                return;
+            }
+
+            if (!latestOutputOn)
+            {
+                if (fullChargeCurrentEnableBox.Checked) SetFullChargeCurrentStatus("等待輸出 ON");
+                else SetFullChargeCurrentStatus("停用");
+                if (fullChargeVoltageEnableBox.Checked) SetFullChargeVoltageStatus("等待輸出 ON");
+                else SetFullChargeVoltageStatus("停用");
+                return;
+            }
+
+            TimeSpan onElapsed = outputOnSince.HasValue ? now - outputOnSince.Value : TimeSpan.Zero;
+            if (fullChargeCurrentEnableBox.Checked)
+            {
+                if (onElapsed < FullChargeStartDelay)
+                {
+                    SetFullChargeCurrentStatus("延遲中 " + Math.Max(0, (int)Math.Ceiling((FullChargeStartDelay - onElapsed).TotalSeconds)).ToString(CultureInfo.InvariantCulture) + "s");
+                    lowCurrentSince = null;
+                }
+                else if (latestIout < (double)fullChargeCurrentBox.Value)
+                {
+                    if (!lowCurrentSince.HasValue) lowCurrentSince = now;
+                    TimeSpan lowElapsed = now - lowCurrentSince.Value;
+                    SetFullChargeCurrentStatus("低電流 " + lowElapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture) + " / " + FullChargeLowCurrentDelay.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture) + "s");
+                    if (lowElapsed >= FullChargeLowCurrentDelay) TriggerAutoOutputOff("滿電截止電流");
+                }
+                else
+                {
+                    lowCurrentSince = null;
+                    SetFullChargeCurrentStatus("監控中 " + latestIout.ToString("0.000", CultureInfo.InvariantCulture) + "A");
+                }
+            }
+            else
+            {
+                lowCurrentSince = null;
+                SetFullChargeCurrentStatus("停用");
+            }
+
+            if (fullChargeVoltageEnableBox.Checked)
+            {
+                if (onElapsed < FullChargeStartDelay)
+                {
+                    SetFullChargeVoltageStatus("延遲中 " + Math.Max(0, (int)Math.Ceiling((FullChargeStartDelay - onElapsed).TotalSeconds)).ToString(CultureInfo.InvariantCulture) + "s");
+                    return;
+                }
+                if (!nextVoltageCheckAt.HasValue) nextVoltageCheckAt = now.AddSeconds((double)fullChargeVoltagePollBox.Value);
+                if (now >= nextVoltageCheckAt.Value && !voltageCheckInProgress && !autoOffInProgress)
+                {
+                    TriggerVoltageCutoffCheck();
+                }
+                else if (!voltageCheckInProgress)
+                {
+                    TimeSpan remain = nextVoltageCheckAt.Value - now;
+                    SetFullChargeVoltageStatus("下次檢查 " + Math.Max(0, (int)Math.Ceiling(remain.TotalSeconds)).ToString(CultureInfo.InvariantCulture) + "s");
+                }
+            }
+            else
+            {
+                nextVoltageCheckAt = null;
+                SetFullChargeVoltageStatus("停用");
+            }
+        }
+
+        private void TriggerAutoOutputOff(string reason)
+        {
+            if (autoOffInProgress || voltageCheckInProgress) return;
+            autoOffInProgress = true;
+            SetFullChargeCurrentStatus("自動關閉中");
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                bool claimed = false;
+                try
+                {
+                    if (!ClaimSerialForAutomation(4000)) return;
+                    claimed = true;
+                    byte[] response = ExecuteWithRetry(BuildWriteSingle(0x0012, 0), 8);
+                    BeginInvoke((Action)(() =>
+                    {
+                        if (response != null)
+                        {
+                            SetStatusText(reason + " 已停止輸出");
+                            SetFullChargeCurrentStatus("已自動截止");
+                        }
+                        else SetFullChargeCurrentStatus("自動關閉失敗");
+                    }));
+                }
+                finally
+                {
+                    if (claimed) busy = false;
+                    autoOffInProgress = false;
+                }
+            });
+        }
+
+        private void TriggerVoltageCutoffCheck()
+        {
+            if (voltageCheckInProgress) return;
+            voltageCheckInProgress = true;
+            lowCurrentSince = null;
+            voltageOffConfirmedAt = null;
+            voltageOffCommandPending = false;
+            voltageReadPending = false;
+            voltageRestoreOnPending = false;
+            nextVoltageCheckAt = null;
+            SetFullChargeVoltageStatus("要求輸出 OFF");
+            Log("SYS", "full charge voltage check: request OFF, polling continues");
+            RequestVoltageCutoffOff();
+        }
+
+        private void RequestVoltageCutoffOff()
+        {
+            if (!voltageCheckInProgress || voltageOffCommandPending || voltageRestoreOnPending) return;
+            voltageOffCommandPending = true;
+            SetFullChargeVoltageStatus("等待輪巡送 OFF");
+        }
+
+        private void ExecuteVoltageAutomationWritesAtPollEnd()
+        {
+            if (voltageCheckInProgress && voltageOffCommandPending && !voltageRestoreOnPending)
+            {
+                byte[] offResponse = ExecuteWithRetry(BuildWriteSingle(0x0012, 0), 8);
+                bool sent = offResponse != null;
+                BeginInvoke((Action)(() =>
+                {
+                    if (sent)
+                    {
+                        voltageOffCommandPending = false;
+                        SetFullChargeVoltageStatus("等待輪巡確認 OFF");
+                        Log("SYS", "full charge voltage check: OFF command sent at poll end");
+                    }
+                    else
+                    {
+                        SetFullChargeVoltageStatus("OFF 寫入重試中");
+                        Log("SYS", "full charge voltage check: OFF write failed at poll end, will retry");
+                    }
+                }));
+            }
+
+            if (voltageCheckInProgress && voltageRestoreOnPending)
+            {
+                byte[] onResponse = ExecuteWithRetry(BuildWriteSingle(0x0012, 1), 8);
+                bool sent = onResponse != null;
+                BeginInvoke((Action)(() =>
+                {
+                    if (sent)
+                    {
+                        voltageReadPending = false;
+                        voltageRestoreOnPending = false;
+                        voltageCheckInProgress = false;
+                        voltageOffConfirmedAt = null;
+                        nextVoltageCheckAt = DateTime.Now.AddSeconds((double)voltageRestorePollSeconds);
+                        SetFullChargeVoltageStatus("恢復 ON，等待輪巡");
+                        Log("SYS", "full charge voltage check: ON command sent at poll end");
+                    }
+                    else
+                    {
+                        SetFullChargeVoltageStatus("恢復 ON 重試中");
+                        Log("SYS", "full charge voltage check: ON write failed at poll end, will retry");
+                    }
+                }));
+            }
+        }
+
+        private void ContinueVoltageCutoffFlow(DateTime now)
+        {
+            if (!voltageCheckInProgress) return;
+            lowCurrentSince = null;
+
+            if (latestOutputOn)
+            {
+                voltageOffConfirmedAt = null;
+                if (!voltageOffCommandPending) RequestVoltageCutoffOff();
+                return;
+            }
+
+            if (!voltageOffConfirmedAt.HasValue)
+            {
+                voltageOffConfirmedAt = now;
+                SetFullChargeVoltageStatus("OFF 已確認，等待 " + FullChargeVoltageOffSettle.TotalSeconds.ToString("0", CultureInfo.InvariantCulture) + "s");
+                Log("SYS", "full charge voltage check: OFF confirmed by polling");
+                return;
+            }
+
+            TimeSpan wait = now - voltageOffConfirmedAt.Value;
+            if (wait < FullChargeVoltageOffSettle)
+            {
+                SetFullChargeVoltageStatus("OFF 穩定中 " + Math.Max(0, (int)Math.Ceiling((FullChargeVoltageOffSettle - wait).TotalSeconds)).ToString(CultureInfo.InvariantCulture) + "s");
+                return;
+            }
+
+            if (!voltageReadPending && !voltageRestoreOnPending)
+            {
+                voltageReadPending = true;
+                decimal target = fullChargeVoltageTargetBox.Value;
+                decimal pollSeconds = fullChargeVoltagePollBox.Value;
+                double measured = latestVout;
+                if (measured >= (double)target)
+                {
+                    voltageReadPending = false;
+                    voltageCheckInProgress = false;
+                    voltageOffConfirmedAt = null;
+                    SetStatusText("滿電截止電壓 已停止輸出");
+                    SetFullChargeVoltageStatus("已截止 " + measured.ToString("0.00", CultureInfo.InvariantCulture) + "V");
+                    Log("SYS", "full charge voltage check: stopped at " + measured.ToString("0.00", CultureInfo.InvariantCulture) + "V");
+                }
+                else
+                {
+                    SetFullChargeVoltageStatus("讀值 " + measured.ToString("0.00", CultureInfo.InvariantCulture) + "V，恢復 ON");
+                    Log("SYS", "full charge voltage check: " + measured.ToString("0.00", CultureInfo.InvariantCulture) + "V < target " + target.ToString("0.00", CultureInfo.InvariantCulture));
+                    RestoreOutputOnForVoltageCheck(pollSeconds);
+                }
+            }
+        }
+
+        private void RestoreOutputOnForVoltageCheck(decimal pollSeconds)
+        {
+            if (voltageRestoreOnPending) return;
+            voltageRestoreOnPending = true;
+            voltageRestorePollSeconds = pollSeconds;
+            SetFullChargeVoltageStatus("等待輪巡恢復 ON");
+        }
+
+        private bool ClaimSerialForAutomation(int timeoutMs)
+        {
+            if (serial == null || !serial.IsOpen) return false;
+            int waited = 0;
+            while (busy && waited < timeoutMs)
+            {
+                Thread.Sleep(50);
+                waited += 50;
+            }
+            if (busy || serial == null || !serial.IsOpen) return false;
+            busy = true;
+            return true;
+        }
+
+        private void UpdateFullChargeStatusLabels()
+        {
+            if (!fullChargeCurrentEnableBox.Checked) SetFullChargeCurrentStatus("停用");
+            if (!fullChargeVoltageEnableBox.Checked) SetFullChargeVoltageStatus("停用");
+            if (fullChargeCurrentEnableBox.Checked && !latestOutputOn) SetFullChargeCurrentStatus("等待輸出 ON");
+            if (fullChargeVoltageEnableBox.Checked && !latestOutputOn) SetFullChargeVoltageStatus("等待輸出 ON");
+        }
+
+        private void SetFullChargeCurrentStatus(string text)
+        {
+            string prefix = IsEnglishUi() ? "Current cutoff: M" : "電流截止：M";
+            fullChargeCurrentStatusLabel.Text = prefix + currentGroup.ToString(CultureInfo.InvariantCulture) + " " + FullChargeStatusText(text);
+        }
+
+        private void SetFullChargeVoltageStatus(string text)
+        {
+            string prefix = IsEnglishUi() ? "Voltage cutoff: M" : "電壓截止：M";
+            fullChargeVoltageStatusLabel.Text = prefix + currentGroup.ToString(CultureInfo.InvariantCulture) + " " + FullChargeStatusText(text);
+        }
+
+        private string FullChargeStatusText(string text)
+        {
+            if (!IsEnglishUi()) return text;
+            return text
+                .Replace("停用", "Disabled")
+                .Replace("等待輸出 ON", "Waiting ON")
+                .Replace("延遲中", "Delay")
+                .Replace("低電流", "Low current")
+                .Replace("監控中", "Monitoring")
+                .Replace("電壓檢查中", "Voltage check")
+                .Replace("自動關閉中", "Auto OFF")
+                .Replace("已自動截止", "Stopped")
+                .Replace("自動關閉失敗", "OFF failed")
+                .Replace("下次檢查", "Next check")
+                .Replace("檢查中 OFF", "Checking OFF")
+                .Replace("要求輸出 OFF", "Requesting OFF")
+                .Replace("等待通訊空檔 OFF", "Waiting bus for OFF")
+                .Replace("等待輪巡送 OFF", "Waiting poll OFF write")
+                .Replace("等待輪巡確認 OFF", "Waiting poll OFF")
+                .Replace("OFF 檢查失敗：通訊忙碌", "OFF check failed: busy")
+                .Replace("OFF 寫入失敗", "OFF write failed")
+                .Replace("OFF 寫入重試中", "OFF retrying")
+                .Replace("OFF 確認失敗", "OFF verify failed")
+                .Replace("OFF 已確認，等待", "OFF verified, wait")
+                .Replace("OFF 穩定中", "OFF settling")
+                .Replace("OFF 失敗", "OFF failed")
+                .Replace("等待輪巡恢復 ON", "Waiting poll ON write")
+                .Replace("恢復 ON，等待輪巡", "ON sent, waiting poll")
+                .Replace("恢復 ON 重試中", "ON retrying")
+                .Replace("讀值失敗，恢復 ON 失敗", "Read failed, ON restore failed")
+                .Replace("讀值失敗，恢復 ON", "Read failed, ON restored")
+                .Replace("已截止", "Stopped")
+                .Replace("讀值", "Read")
+                .Replace("恢復 ON 失敗", "ON restore failed")
+                .Replace("，恢復 ON", ", ON restored");
         }
 
         private static string FormatRunTime(int hours, int minutes, int seconds)
@@ -1633,6 +2267,9 @@ namespace SK150CControl
             setOvpBox.QuickSelectOnFocus = enabled;
             setOcpBox.QuickSelectOnFocus = enabled;
             setOppBox.QuickSelectOnFocus = enabled;
+            fullChargeCurrentBox.QuickSelectOnFocus = enabled;
+            fullChargeVoltageTargetBox.QuickSelectOnFocus = enabled;
+            fullChargeVoltagePollBox.QuickSelectOnFocus = enabled;
         }
 
         private void ApplyLanguage()
@@ -1643,6 +2280,7 @@ namespace SK150CControl
             protectTile.SetText(ProtectText(currentProtectCode));
             protectTile.SetAlert(currentProtectCode != 0);
             if (currentProtectCode != 0) SetStatusText("保護：" + ProtectText(currentProtectCode));
+            UpdateFullChargeStatusLabels();
         }
 
         private void ApplyLanguageToControls(Control parent, bool english)
@@ -1787,6 +2425,19 @@ namespace SK150CControl
                 { "調用中", "Calling" },
                 { "校準/清零", "Calibrate/Zero" },
                 { "TX / RX 通訊紀錄", "TX / RX Log" }
+                ,
+                { "常用", "Common" },
+                { "進階", "Advanced" },
+                { "滿電截止", "Full Charge Cutoff" },
+                { "滿電截止電流", "Cutoff Current" },
+                { "套用截止電流", "Apply Current" },
+                { "滿電截止電壓", "Cutoff Voltage" },
+                { "目標電壓", "Target Voltage" },
+                { "套用目標電壓", "Apply Target" },
+                { "套用電壓", "Apply V" },
+                { "輪詢時間", "Poll Interval" },
+                { "套用輪詢時間", "Apply Interval" },
+                { "套用", "Apply" }
             };
 
             int from = english ? 0 : 1;
@@ -1924,7 +2575,7 @@ namespace SK150CControl
             {
                 Text = text,
                 Dock = DockStyle.Fill,
-                Height = 26,
+                Height = 22,
                 ForeColor = Color.FromArgb(62, 70, 80),
                 Font = new Font("Microsoft JhengHei UI", 9F, FontStyle.Bold)
             };
@@ -2442,6 +3093,8 @@ namespace SK150CControl
     public sealed class StepEditor : Panel
     {
         private readonly TextBox textBox = new TextBox();
+        private readonly TableLayoutPanel layout;
+        private readonly List<Button> stepButtons = new List<Button>();
         private readonly decimal minimum;
         private readonly decimal maximum;
         private readonly int decimalPlaces;
@@ -2453,6 +3106,7 @@ namespace SK150CControl
         private bool quickSelectOnFocus;
 
         public event EventHandler UserChanged;
+        public event EventHandler EnterPressed;
 
         public StepEditor(decimal min, decimal max, decimal initial, int decimals, string unitText, decimal largeStep, decimal smallStep, Color color)
         {
@@ -2465,7 +3119,7 @@ namespace SK150CControl
             Height = 38;
             Margin = new Padding(0, 0, 0, 6);
 
-            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 6, RowCount = 1 };
+            layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 6, RowCount = 1 };
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 42));
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 42));
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -2499,6 +3153,7 @@ namespace SK150CControl
                 if (e.KeyCode == Keys.Enter)
                 {
                     CommitText(true);
+                    if (EnterPressed != null) EnterPressed(this, EventArgs.Empty);
                     e.SuppressKeyPress = true;
                 }
                 else if (e.KeyCode == Keys.Up)
@@ -2520,6 +3175,18 @@ namespace SK150CControl
             AddStepButton(layout, 4, "+" + FormatStep(smallStep), smallStep);
             AddStepButton(layout, 5, "+" + FormatStep(largeStep), largeStep);
             SetValue((double)initial);
+        }
+
+        public void UseCompactInput()
+        {
+            if (layout.ColumnStyles.Count < 6) return;
+            layout.ColumnStyles[0].Width = 0;
+            layout.ColumnStyles[1].Width = 0;
+            layout.ColumnStyles[4].Width = 0;
+            layout.ColumnStyles[5].Width = 0;
+            for (int i = 0; i < stepButtons.Count; i++) stepButtons[i].Visible = false;
+            Height = 28;
+            textBox.Font = new Font("Segoe UI", 11F, FontStyle.Bold);
         }
 
         public decimal Value
@@ -2650,6 +3317,7 @@ namespace SK150CControl
                 Font = new Font("Segoe UI", 7.5F, FontStyle.Bold)
             };
             button.Click += delegate { Add(delta); };
+            stepButtons.Add(button);
             layout.Controls.Add(button, column, 0);
         }
 

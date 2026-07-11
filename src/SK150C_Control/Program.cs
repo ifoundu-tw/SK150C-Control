@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
+using System.IO;
 using System.IO.Ports;
 using System.Linq;
 using Microsoft.Win32;
@@ -9,6 +10,7 @@ using System.Reflection;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
+using System.Web.Script.Serialization;
 
 namespace SK150CControl
 {
@@ -25,7 +27,15 @@ namespace SK150CControl
 
     public sealed class MainForm : Form
     {
-        private const string VersionName = "SK150C_Control_v39";
+        private enum ToggleKind
+        {
+            Normal,
+            Danger,
+            Current,
+            Voltage
+        }
+
+        private const string VersionName = "SK150C_Control_v49";
         private const int MaxLogLines = 2000;
         private const string RegistryBasePath = @"Software\SK150C_Control";
         private static readonly TimeSpan FullChargeStartDelay = TimeSpan.FromSeconds(10);
@@ -79,7 +89,9 @@ namespace SK150CControl
         private readonly CheckBox quickInputBox = new CheckBox();
         private readonly Button restartButton = new Button();
         private readonly Button factoryButton = new Button();
-        private readonly Button zeroButton = new Button();
+        private readonly Button calibrationButton = new Button();
+        private readonly Button exportGroupsButton = new Button();
+        private readonly Button importGroupsButton = new Button();
         private readonly Button writeVoltageButton = new Button();
         private readonly Button writeCurrentButton = new Button();
         private readonly Button writeLvpButton = new Button();
@@ -91,6 +103,7 @@ namespace SK150CControl
         private readonly Button applyFullChargeVoltagePollButton = new Button();
         private readonly Button fullChargeCurrentToggleButton = new Button();
         private readonly Button fullChargeVoltageToggleButton = new Button();
+        private readonly Button siniToggleButton = new Button();
         private readonly Button outputOnButton = new Button();
         private readonly Button outputOffButton = new Button();
         private readonly Button clearLogButton = new Button();
@@ -104,6 +117,9 @@ namespace SK150CControl
         private readonly Dictionary<int, QuickGroupButton> quickGroupButtons = new Dictionary<int, QuickGroupButton>();
         private readonly double?[] quickGroupVoltages = new double?[11];
         private readonly double?[] quickGroupCurrents = new double?[11];
+        private readonly bool?[] quickGroupSini = new bool?[11];
+        private readonly bool?[] quickGroupCurrentCutoff = new bool?[11];
+        private readonly bool?[] quickGroupVoltageCutoff = new bool?[11];
 
         private readonly Label statusLabel = new Label();
         private readonly Label successLabel = new Label();
@@ -160,6 +176,7 @@ namespace SK150CControl
             WindowState = FormWindowState.Maximized;
 
             BuildUi();
+            ApplyLanguage();
             RefreshPorts();
             pollTimer.Tick += PollTimer_Tick;
             autoPollBox.Checked = true;
@@ -240,7 +257,7 @@ namespace SK150CControl
             container.RowStyles.Add(new RowStyle(SizeType.Absolute, 160));
             panel.Controls.Add(container);
 
-            var flow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 27, Padding = new Padding(12, 32, 12, 4) };
+            var flow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 30, Padding = new Padding(12, 32, 12, 4) };
             flow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 76));
             flow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             container.Controls.Add(flow, 0, 0);
@@ -335,25 +352,41 @@ namespace SK150CControl
             var maintenance = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = true };
             restartButton.Text = "重啟";
             factoryButton.Text = "恢復出廠";
-            zeroButton.Text = "校準/清零";
+            calibrationButton.Text = "校準";
             restartButton.Width = 66;
             factoryButton.Width = 82;
-            zeroButton.Width = 82;
-            restartButton.Height = factoryButton.Height = zeroButton.Height = 30;
+            calibrationButton.Width = 66;
+            restartButton.Height = factoryButton.Height = calibrationButton.Height = 30;
             restartButton.Click += delegate { ConfirmAndWrite("重啟裝置", "確定要送出重啟命令？輸出可能會中斷。", 0x002F, "重啟"); };
             factoryButton.Click += delegate { ConfirmAndWrite("恢復出廠設定", "確定要恢復出廠設定？目前參數可能會被清除。", 0x0020, "恢復出廠設定"); };
-            zeroButton.Click += delegate { ConfirmAndWrite("校準/清零", "確定要送出校準/清零命令？請確認設備處於適合校準的狀態。", 0x0021, "校準/清零"); };
+            calibrationButton.Click += delegate { OpenCalibrationWindow(); };
             maintenance.Controls.Add(restartButton);
             maintenance.Controls.Add(factoryButton);
-            maintenance.Controls.Add(zeroButton);
+            maintenance.Controls.Add(calibrationButton);
             flow.Controls.Add(maintenance, 0, 23);
             flow.SetColumnSpan(maintenance, 2);
 
+            var groupIoTitle = SectionText("M組參數");
+            flow.Controls.Add(groupIoTitle, 0, 24);
+            flow.SetColumnSpan(groupIoTitle, 2);
+
+            var groupIo = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = true };
+            exportGroupsButton.Text = "匯出 M組";
+            importGroupsButton.Text = "匯入 M組";
+            exportGroupsButton.Width = importGroupsButton.Width = 86;
+            exportGroupsButton.Height = importGroupsButton.Height = 30;
+            exportGroupsButton.Click += delegate { ExportGroupSettings(); };
+            importGroupsButton.Click += delegate { ImportGroupSettings(); };
+            groupIo.Controls.Add(exportGroupsButton);
+            groupIo.Controls.Add(importGroupsButton);
+            flow.Controls.Add(groupIo, 0, 25);
+            flow.SetColumnSpan(groupIo, 2);
+
             languageBox.DropDownStyle = ComboBoxStyle.DropDownList;
             languageBox.Items.AddRange(new object[] { "中文", "English" });
-            languageBox.SelectedItem = "中文";
+            languageBox.SelectedItem = InitialLanguageSelection();
             languageBox.SelectedIndexChanged += delegate { ApplyLanguage(); };
-            AddRow(flow, 24, "語言", languageBox);
+            AddRow(flow, 27, "語言", languageBox);
 
             SetStatusText("待命");
             container.Controls.Add(BuildSignaturePanel(), 0, 1);
@@ -582,6 +615,7 @@ namespace SK150CControl
                 QueueVerifiedWrite(CurrentGroupBase() + 5, (int)Math.Round((double)setOppBox.Value * 10.0), "設定 OPP M" + currentGroup, setOppBox);
             };
             advancedFlow.Controls.Add(BuildParameterBlock("OPP 過功率保護", setOppBox, writeOppButton));
+            advancedFlow.Controls.Add(BuildSiniPanel());
             BindEnterToWriteButtons();
 
             var quick = new TableLayoutPanel { Width = 260, Height = 228, ColumnCount = 2, RowCount = 6, Margin = new Padding(0, 0, 0, 4) };
@@ -600,6 +634,28 @@ namespace SK150CControl
             layout.Controls.Add(BuildRightFooterPanel(), 0, 1);
             LoadFullChargeSettings(currentGroup);
             return panel;
+        }
+
+        private Control BuildSiniPanel()
+        {
+            var block = new Panel { Width = 260, Height = 52, Margin = new Padding(0, 0, 0, 4), BackColor = Color.FromArgb(250, 251, 252) };
+            var title = SectionText("S-INI 調用後輸出");
+            title.SetBounds(0, 0, 170, 28);
+            title.Dock = DockStyle.None;
+
+            siniToggleButton.SetBounds(190, 4, 70, 34);
+            StyleOnOffToggle(siniToggleButton, false, ToggleKind.Danger);
+            siniToggleButton.Click += delegate
+            {
+                bool next = !(currentGroup >= 0 && currentGroup < quickGroupSini.Length && quickGroupSini[currentGroup].GetValueOrDefault(false));
+                QueueWriteRegister(CurrentGroupBase() + 13, next ? 1 : 0, "S-INI M" + currentGroup);
+                SetQuickGroupSini(currentGroup, next);
+                SetStatusText("S-INI M" + currentGroup + " " + (next ? "ON" : "OFF"));
+            };
+
+            block.Controls.Add(title);
+            block.Controls.Add(siniToggleButton);
+            return block;
         }
 
         private static FlowLayoutPanel BuildRightFlow()
@@ -641,7 +697,8 @@ namespace SK150CControl
             fullChargeCurrentEnableBox.CheckedChanged += delegate
             {
                 if (!syncingFullChargeSettings) SaveFullChargeSettings();
-                StyleOnOffToggle(fullChargeCurrentToggleButton, fullChargeCurrentEnableBox.Checked);
+                StyleOnOffToggle(fullChargeCurrentToggleButton, fullChargeCurrentEnableBox.Checked, ToggleKind.Current);
+                UpdateQuickGroupCutoffIndicators(currentGroup);
                 UpdateFullChargeStatusLabels();
             };
 
@@ -649,12 +706,14 @@ namespace SK150CControl
             applyFullChargeCurrentButton.Click += delegate { SaveFullChargeSettings(); ClearDirty(fullChargeCurrentBox); };
             fullChargeCurrentToggleButton.Click += delegate { fullChargeCurrentEnableBox.Checked = !fullChargeCurrentEnableBox.Checked; };
             flow.Controls.Add(BuildFullChargeParameterBlock("滿電截止電流", fullChargeCurrentBox, applyFullChargeCurrentButton, fullChargeCurrentToggleButton));
-            flow.Controls.Add(BuildStatusLine(fullChargeCurrentStatusLabel));
+            flow.Controls.Add(BuildStatusLine(fullChargeCurrentStatusLabel, "滿電截止電流說明",
+                "充電接近滿電時，輸出電流會逐漸下降。\r\n當電流低於指定目標後，程式會自動關閉輸出。"));
 
             fullChargeVoltageEnableBox.CheckedChanged += delegate
             {
                 if (!syncingFullChargeSettings) SaveFullChargeSettings();
-                StyleOnOffToggle(fullChargeVoltageToggleButton, fullChargeVoltageEnableBox.Checked);
+                StyleOnOffToggle(fullChargeVoltageToggleButton, fullChargeVoltageEnableBox.Checked, ToggleKind.Voltage);
+                UpdateQuickGroupCutoffIndicators(currentGroup);
                 UpdateFullChargeStatusLabels();
             };
 
@@ -665,7 +724,8 @@ namespace SK150CControl
             applyFullChargeVoltagePollButton.Text = "套用";
             applyFullChargeVoltagePollButton.Click += delegate { SaveFullChargeSettings(); ClearDirty(fullChargeVoltagePollBox); };
             flow.Controls.Add(BuildFullChargeVoltageRow());
-            flow.Controls.Add(BuildStatusLine(fullChargeVoltageStatusLabel));
+            flow.Controls.Add(BuildStatusLine(fullChargeVoltageStatusLabel, "滿電截止電壓說明",
+                "使用前需將探頭接在電池輸出端，確保能量測到電池正負極電壓。\r\n此功能會依設定週期偵測電壓，當電壓高於設定目標時自動關閉輸出。"));
             return flow;
         }
 
@@ -685,7 +745,7 @@ namespace SK150CControl
             toggleButton.SetBounds(202, 49, 58, 26);
             applyButton.Anchor = AnchorStyles.Left | AnchorStyles.Top;
             toggleButton.Anchor = AnchorStyles.Right | AnchorStyles.Top;
-            StyleOnOffToggle(toggleButton, false);
+            StyleOnOffToggle(toggleButton, false, ToggleKind.Current);
 
             block.Controls.Add(titleLabel);
             block.Controls.Add(editor);
@@ -722,7 +782,7 @@ namespace SK150CControl
             fullChargeVoltageTargetBox.SetBounds(0, 21, 172, 26);
             applyFullChargeVoltageButton.SetBounds(0, 49, 108, 26);
             fullChargeVoltageToggleButton.SetBounds(114, 49, 58, 26);
-            StyleOnOffToggle(fullChargeVoltageToggleButton, false);
+            StyleOnOffToggle(fullChargeVoltageToggleButton, false, ToggleKind.Voltage);
 
             var pollTitle = SectionText("輪詢時間");
             pollTitle.SetBounds(0, 0, 80, 20);
@@ -745,16 +805,40 @@ namespace SK150CControl
             return outer;
         }
 
-        private static Control BuildStatusLine(Label label)
+        private Control BuildStatusLine(Label label, string title, string message)
         {
-            label.Width = 260;
-            label.Height = 22;
-            label.Margin = new Padding(0, 0, 0, 4);
+            var row = new Panel { Width = 260, Height = 22, Margin = new Padding(0, 0, 0, 4), BackColor = Color.FromArgb(245, 247, 249) };
+            label.SetBounds(6, 0, 228, 22);
+            label.Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right;
             label.TextAlign = ContentAlignment.MiddleLeft;
             label.Font = new Font("Microsoft JhengHei UI", 8F, FontStyle.Bold);
             label.ForeColor = Color.FromArgb(76, 86, 96);
-            label.BackColor = Color.FromArgb(245, 247, 249);
-            return label;
+            label.BackColor = Color.Transparent;
+
+            var helpButton = new Button
+            {
+                Text = "?",
+                Width = 20,
+                Height = 20,
+                Left = 238,
+                Top = 1,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.White,
+                ForeColor = Color.FromArgb(76, 86, 96),
+                Font = new Font("Segoe UI", 7F, FontStyle.Bold),
+                TabStop = false
+            };
+            helpButton.FlatAppearance.BorderColor = Color.FromArgb(176, 186, 196);
+            helpButton.FlatAppearance.BorderSize = 1;
+            helpButton.Click += delegate
+            {
+                MessageBox.Show(this, Ui(message), Ui(title), MessageBoxButtons.OK, MessageBoxIcon.Information);
+            };
+
+            row.Controls.Add(label);
+            row.Controls.Add(helpButton);
+            return row;
         }
 
         private string PresetRegistryPath(int group)
@@ -784,6 +868,7 @@ namespace SK150CControl
                     ClearDirty(fullChargeCurrentBox);
                     ClearDirty(fullChargeVoltageTargetBox);
                     ClearDirty(fullChargeVoltagePollBox);
+                    SetQuickGroupCutoffIndicators(group, currentEnabled, voltageEnabled);
                 }
             }
             finally
@@ -805,6 +890,53 @@ namespace SK150CControl
                 key.SetValue("FullChargeVoltagePollSeconds", fullChargeVoltagePollBox.Value.ToString("0", CultureInfo.InvariantCulture), RegistryValueKind.String);
             }
             UpdateFullChargeStatusLabels();
+            SetQuickGroupCutoffIndicators(currentGroup, fullChargeCurrentEnableBox.Checked, fullChargeVoltageEnableBox.Checked);
+        }
+
+        private void UpdatePresetBaselineAndCutoffs(int group, int rawVoltage, int rawCurrent)
+        {
+            bool changed = false;
+            using (RegistryKey key = Registry.CurrentUser.CreateSubKey(PresetRegistryPath(group)))
+            {
+                object voltageValue = key.GetValue("LastPresetVoltageRaw");
+                object currentValue = key.GetValue("LastPresetCurrentRaw");
+                bool hasBaseline = voltageValue != null && currentValue != null;
+                int oldVoltage;
+                int oldCurrent;
+                changed = hasBaseline &&
+                    (!int.TryParse(voltageValue.ToString(), out oldVoltage) || oldVoltage != rawVoltage ||
+                     !int.TryParse(currentValue.ToString(), out oldCurrent) || oldCurrent != rawCurrent);
+
+                if (changed)
+                {
+                    key.SetValue("FullChargeCutoffCurrentEnabled", 0, RegistryValueKind.DWord);
+                    key.SetValue("FullChargeCutoffVoltageEnabled", 0, RegistryValueKind.DWord);
+                    SetQuickGroupCutoffIndicators(group, false, false);
+                    Log("SYS", "M" + group.ToString(CultureInfo.InvariantCulture) + " preset V/I changed, full charge cutoffs disabled");
+                }
+
+                key.SetValue("LastPresetVoltageRaw", rawVoltage, RegistryValueKind.DWord);
+                key.SetValue("LastPresetCurrentRaw", rawCurrent, RegistryValueKind.DWord);
+            }
+
+            if (changed && group == currentGroup)
+            {
+                bool oldSync = syncingFullChargeSettings;
+                syncingFullChargeSettings = true;
+                try
+                {
+                    fullChargeCurrentEnableBox.Checked = false;
+                    fullChargeVoltageEnableBox.Checked = false;
+                    StyleOnOffToggle(fullChargeCurrentToggleButton, false, ToggleKind.Current);
+                    StyleOnOffToggle(fullChargeVoltageToggleButton, false, ToggleKind.Voltage);
+                }
+                finally
+                {
+                    syncingFullChargeSettings = oldSync;
+                }
+                ResetFullChargeState();
+                UpdateFullChargeStatusLabels();
+            }
         }
 
         private static bool ReadRegistryBool(RegistryKey key, string name, bool fallback)
@@ -816,6 +948,37 @@ namespace SK150CControl
             bool boolValue;
             if (bool.TryParse(value.ToString(), out boolValue)) return boolValue;
             return fallback;
+        }
+
+        private string InitialLanguageSelection()
+        {
+            using (RegistryKey key = Registry.CurrentUser.CreateSubKey(RegistryBasePath))
+            {
+                object value = key.GetValue("Language");
+                if (value != null)
+                {
+                    string text = value.ToString();
+                    if (string.Equals(text, "zh-TW", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(text, "zh", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(text, "中文", StringComparison.OrdinalIgnoreCase))
+                        return "中文";
+                    if (string.Equals(text, "en-US", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(text, "en", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(text, "English", StringComparison.OrdinalIgnoreCase))
+                        return "English";
+                }
+            }
+
+            string culture = CultureInfo.CurrentUICulture.Name;
+            return culture.StartsWith("zh", StringComparison.OrdinalIgnoreCase) ? "中文" : "English";
+        }
+
+        private void SaveLanguageSelection()
+        {
+            using (RegistryKey key = Registry.CurrentUser.CreateSubKey(RegistryBasePath))
+            {
+                key.SetValue("Language", IsEnglishUi() ? "en-US" : "zh-TW", RegistryValueKind.String);
+            }
         }
 
         private static decimal ReadRegistryDecimal(RegistryKey key, string name, decimal fallback)
@@ -844,15 +1007,26 @@ namespace SK150CControl
 
         private void BindEnterToWriteButtons()
         {
-            setVoltageBox.EnterPressed += delegate { writeVoltageButton.PerformClick(); };
-            setCurrentBox.EnterPressed += delegate { writeCurrentButton.PerformClick(); };
-            setLvpBox.EnterPressed += delegate { writeLvpButton.PerformClick(); };
-            setOvpBox.EnterPressed += delegate { writeOvpButton.PerformClick(); };
-            setOcpBox.EnterPressed += delegate { writeOcpButton.PerformClick(); };
-            setOppBox.EnterPressed += delegate { writeOppButton.PerformClick(); };
-            fullChargeCurrentBox.EnterPressed += delegate { applyFullChargeCurrentButton.PerformClick(); };
-            fullChargeVoltageTargetBox.EnterPressed += delegate { applyFullChargeVoltageButton.PerformClick(); };
-            fullChargeVoltagePollBox.EnterPressed += delegate { applyFullChargeVoltagePollButton.PerformClick(); };
+            setVoltageBox.EnterPressed += delegate { PerformEnterActionIfDirty(setVoltageBox, writeVoltageButton); };
+            setCurrentBox.EnterPressed += delegate { PerformEnterActionIfDirty(setCurrentBox, writeCurrentButton); };
+            setLvpBox.EnterPressed += delegate { PerformEnterActionIfDirty(setLvpBox, writeLvpButton); };
+            setOvpBox.EnterPressed += delegate { PerformEnterActionIfDirty(setOvpBox, writeOvpButton); };
+            setOcpBox.EnterPressed += delegate { PerformEnterActionIfDirty(setOcpBox, writeOcpButton); };
+            setOppBox.EnterPressed += delegate { PerformEnterActionIfDirty(setOppBox, writeOppButton); };
+            fullChargeCurrentBox.EnterPressed += delegate { PerformEnterActionIfDirty(fullChargeCurrentBox, applyFullChargeCurrentButton); };
+            fullChargeVoltageTargetBox.EnterPressed += delegate { PerformEnterActionIfDirty(fullChargeVoltageTargetBox, applyFullChargeVoltageButton); };
+            fullChargeVoltagePollBox.EnterPressed += delegate { PerformEnterActionIfDirty(fullChargeVoltagePollBox, applyFullChargeVoltagePollButton); };
+        }
+
+        private void PerformEnterActionIfDirty(StepEditor editor, Button button)
+        {
+            if (!editor.IsDirty)
+            {
+                ActiveControl = null;
+                return;
+            }
+            button.PerformClick();
+            ActiveControl = button;
         }
 
         private Control BuildRightFooterPanel()
@@ -905,12 +1079,35 @@ namespace SK150CControl
 
         private static void StyleOnOffToggle(Button button, bool enabled)
         {
+            StyleOnOffToggle(button, enabled, ToggleKind.Normal);
+        }
+
+        private static void StyleOnOffToggle(Button button, bool enabled, ToggleKind kind)
+        {
             button.Text = enabled ? "ON" : "OFF";
-            button.BackColor = enabled ? Color.FromArgb(35, 96, 73) : Color.FromArgb(226, 232, 240);
+            Color onBack = Color.FromArgb(35, 96, 73);
+            Color onBorder = Color.FromArgb(23, 78, 57);
+            if (kind == ToggleKind.Danger)
+            {
+                onBack = Color.FromArgb(185, 28, 28);
+                onBorder = Color.FromArgb(127, 29, 29);
+            }
+            else if (kind == ToggleKind.Current)
+            {
+                onBack = Color.FromArgb(184, 134, 11);
+                onBorder = Color.FromArgb(146, 101, 8);
+            }
+            else if (kind == ToggleKind.Voltage)
+            {
+                onBack = Color.FromArgb(35, 96, 73);
+                onBorder = Color.FromArgb(23, 78, 57);
+            }
+
+            button.BackColor = enabled ? onBack : Color.FromArgb(226, 232, 240);
             button.ForeColor = enabled ? Color.White : Color.FromArgb(31, 38, 46);
             button.Font = new Font("Segoe UI", 9F, FontStyle.Bold);
             button.FlatStyle = FlatStyle.Flat;
-            button.FlatAppearance.BorderColor = enabled ? Color.FromArgb(23, 78, 57) : Color.FromArgb(190, 199, 208);
+            button.FlatAppearance.BorderColor = enabled ? onBorder : Color.FromArgb(190, 199, 208);
         }
 
         private static void SetupStatusBadge(Label label, string text, Color backColor, float fontSize)
@@ -1091,6 +1288,7 @@ namespace SK150CControl
                     if (response != null)
                     {
                         ExecuteVoltageAutomationWritesAtPollEnd();
+                        SyncActiveGroupFromDevice();
                         SyncProtectionFromGroup();
                         pollCounter++;
                         if (pollCounter % 5 == 0) SyncDeviceOptions();
@@ -1121,7 +1319,7 @@ namespace SK150CControl
             {
                 try
                 {
-                    var groupData = ExecuteWithRetry(BuildRead(GroupBase(group), 6), ExpectedReadLength(6));
+                    var groupData = ExecuteWithRetry(BuildRead(GroupBase(group), 14), ExpectedReadLength(14));
                     if (groupData == null)
                     {
                         BeginInvoke((Action)(() => SetStatusText("M" + group + " 讀取失敗")));
@@ -1132,7 +1330,7 @@ namespace SK150CControl
                     {
                         editGroup = -1;
                         UpdateGroupEditor(groupData, true);
-                        UpdateQuickGroupButton(group, Word(groupData, 3) / 100.0, Word(groupData, 5) / 1000.0);
+                        UpdateQuickGroupButton(group, Word(groupData, 3) / 100.0, Word(groupData, 5) / 1000.0, Word(groupData, 29) != 0);
                         editGroupLabel.Text = "保護寫入：目前 M 組";
                         SetStatusText("M" + group + " 調用中");
                     }));
@@ -1147,6 +1345,7 @@ namespace SK150CControl
                         {
                             SetActiveQuickGroup(group);
                             LoadFullChargeSettings(group);
+                            StyleOnOffToggle(siniToggleButton, quickGroupSini[group].GetValueOrDefault(false), ToggleKind.Danger);
                             SetStatusText("已調用 M" + group + " 並同步");
                         }));
                     }
@@ -1162,6 +1361,32 @@ namespace SK150CControl
             });
         }
 
+        private bool WriteSingleVerified(int address, int value, string label)
+        {
+            byte[] writeResponse = ExecuteWithRetry(BuildWriteSingle(address, value), 8);
+            if (writeResponse == null)
+            {
+                Log("SYS", label + " write no response");
+                return false;
+            }
+
+            Thread.Sleep(80);
+            byte[] readResponse = ExecuteWithRetry(BuildRead(address, 1), ExpectedReadLength(1));
+            if (readResponse == null)
+            {
+                Log("SYS", label + " verify no response");
+                return false;
+            }
+
+            int readBack = Word(readResponse, 3);
+            if (readBack != value)
+            {
+                Log("SYS", label + " verify mismatch write " + value.ToString(CultureInfo.InvariantCulture) + " read " + readBack.ToString(CultureInfo.InvariantCulture));
+                return false;
+            }
+
+            return true;
+        }
         private void QueueQuickGroupSummaryScan(bool startPollingAfter)
         {
             QueueQuickGroupSummaryScan(startPollingAfter, false);
@@ -1195,17 +1420,22 @@ namespace SK150CControl
                     }));
                     for (int group = 0; group <= 10; group++)
                     {
-                        var response = ExecuteWithRetry(BuildRead(GroupBase(group), 2), ExpectedReadLength(2));
+                        var response = ExecuteWithRetry(BuildRead(GroupBase(group), 14), ExpectedReadLength(14));
                         int capturedGroup = group;
                         if (response != null)
                         {
                             int rawVoltage = Word(response, 3);
                             int rawCurrent = Word(response, 5);
-                            BeginInvoke((Action)(() => UpdateQuickGroupButton(capturedGroup, rawVoltage / 100.0, rawCurrent / 1000.0)));
+                            bool siniOn = Word(response, 29) != 0;
+                            BeginInvoke((Action)(() =>
+                            {
+                                UpdatePresetBaselineAndCutoffs(capturedGroup, rawVoltage, rawCurrent);
+                                UpdateQuickGroupButton(capturedGroup, rawVoltage / 100.0, rawCurrent / 1000.0, siniOn);
+                            }));
                         }
                         else
                         {
-                            BeginInvoke((Action)(() => UpdateQuickGroupButton(capturedGroup, null, null)));
+                            BeginInvoke((Action)(() => UpdateQuickGroupButton(capturedGroup, null, null, null)));
                         }
                         Thread.Sleep(35);
                     }
@@ -1248,6 +1478,429 @@ namespace SK150CControl
             QueueQuickGroupSummaryScan(restartPolling, true);
         }
 
+        private void ExportGroupSettings()
+        {
+            if (serial == null || !serial.IsOpen)
+            {
+                MessageBox.Show(Ui("尚未連線。"), "SK150C", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            if (busy)
+            {
+                SetStatusText("忙碌中");
+                return;
+            }
+
+            using (var dialog = new SaveFileDialog())
+            {
+                dialog.Title = Ui("匯出 M組參數");
+                dialog.Filter = "JSON (*.json)|*.json";
+                dialog.FileName = "SK150C_M_Groups_" + DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture) + ".json";
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                QueueExportGroupSettings(dialog.FileName);
+            }
+        }
+
+        private void QueueExportGroupSettings(string path)
+        {
+            busy = true;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                bool ok = false;
+                try
+                {
+                    BeginInvoke((Action)(() => SetStatusText("匯出 M組參數")));
+                    var groups = new List<Dictionary<string, object>>();
+                    for (int group = 0; group <= 10; group++)
+                    {
+                        byte[] response = ExecuteWithRetry(BuildRead(GroupBase(group), 14), ExpectedReadLength(14));
+                        if (response == null)
+                        {
+                            BeginInvoke((Action)(() => MessageBox.Show(this, Ui("讀取失敗") + " M" + group.ToString(CultureInfo.InvariantCulture), "SK150C", MessageBoxButtons.OK, MessageBoxIcon.Warning)));
+                            return;
+                        }
+
+                        int[] raw = new int[14];
+                        for (int i = 0; i < raw.Length; i++) raw[i] = Word(response, 3 + i * 2);
+                        Dictionary<string, object> cutoff = ReadFullChargeExport(group);
+                        groups.Add(new Dictionary<string, object>
+                        {
+                            { "group", group },
+                            { "vSetRaw", raw[0] },
+                            { "iSetRaw", raw[1] },
+                            { "lvpRaw", raw[2] },
+                            { "ovpRaw", raw[3] },
+                            { "ocpRaw", raw[4] },
+                            { "oppRaw", raw[5] },
+                            { "sIni", raw[13] },
+                            { "rawWords", raw },
+                            { "fullCharge", cutoff }
+                        });
+                    }
+
+                    var root = new Dictionary<string, object>
+                    {
+                        { "schema", "SK150C_M_GROUPS" },
+                        { "version", 1 },
+                        { "appVersion", VersionName },
+                        { "exportedAt", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) },
+                        { "groups", groups }
+                    };
+                    string json = new JavaScriptSerializer().Serialize(root);
+                    File.WriteAllText(path, PrettyJson(json), Encoding.UTF8);
+                    ok = true;
+                    BeginInvoke((Action)(() =>
+                    {
+                        SetStatusText("M組參數已匯出");
+                        MessageBox.Show(this, Ui("匯出完成") + "\r\n" + path, "SK150C", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }));
+                }
+                catch (Exception ex)
+                {
+                    BeginInvoke((Action)(() => MessageBox.Show(this, ex.Message, Ui("匯出失敗"), MessageBoxButtons.OK, MessageBoxIcon.Warning)));
+                }
+                finally
+                {
+                    busy = false;
+                    if (!ok) BeginInvoke((Action)(() => SetStatusText("匯出失敗")));
+                }
+            });
+        }
+
+        private Dictionary<string, object> ReadFullChargeExport(int group)
+        {
+            using (RegistryKey key = Registry.CurrentUser.CreateSubKey(PresetRegistryPath(group)))
+            {
+                return new Dictionary<string, object>
+                {
+                    { "currentEnabled", ReadRegistryBool(key, "FullChargeCutoffCurrentEnabled", false) },
+                    { "currentA", ReadRegistryDecimal(key, "FullChargeCutoffCurrent", 0.100M).ToString("0.000", CultureInfo.InvariantCulture) },
+                    { "voltageEnabled", ReadRegistryBool(key, "FullChargeCutoffVoltageEnabled", false) },
+                    { "targetV", ReadRegistryDecimal(key, "FullChargeTargetVoltage", setVoltageBox.Value).ToString("0.00", CultureInfo.InvariantCulture) },
+                    { "pollSeconds", ReadRegistryDecimal(key, "FullChargeVoltagePollSeconds", 60M).ToString("0", CultureInfo.InvariantCulture) }
+                };
+            }
+        }
+
+        private void ImportGroupSettings()
+        {
+            if (serial == null || !serial.IsOpen)
+            {
+                MessageBox.Show(Ui("尚未連線。"), "SK150C", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            if (busy)
+            {
+                SetStatusText("忙碌中");
+                return;
+            }
+
+            using (var dialog = new OpenFileDialog())
+            {
+                dialog.Title = Ui("匯入 M組參數");
+                dialog.Filter = "JSON (*.json)|*.json";
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+
+                List<GroupImportData> groups;
+                string error;
+                if (!TryLoadGroupImportFile(dialog.FileName, out groups, out error))
+                {
+                    MessageBox.Show(this, error, Ui("匯入格式錯誤"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                QueueImportGroupSettings(groups);
+            }
+        }
+
+        private bool TryLoadGroupImportFile(string path, out List<GroupImportData> groups, out string error)
+        {
+            groups = new List<GroupImportData>();
+            error = null;
+            try
+            {
+                string json = File.ReadAllText(path, Encoding.UTF8);
+                var root = new JavaScriptSerializer().DeserializeObject(json) as Dictionary<string, object>;
+                if (root == null)
+                {
+                    error = Ui("JSON 根格式錯誤");
+                    return false;
+                }
+                object schema;
+                if (!root.TryGetValue("schema", out schema) || Convert.ToString(schema, CultureInfo.InvariantCulture) != "SK150C_M_GROUPS")
+                {
+                    error = Ui("不是 SK150C M組參數檔");
+                    return false;
+                }
+                object groupsObject;
+                if (!root.TryGetValue("groups", out groupsObject))
+                {
+                    error = Ui("缺少 groups 欄位");
+                    return false;
+                }
+                object[] groupArray = groupsObject as object[];
+                if (groupArray == null || groupArray.Length != 11)
+                {
+                    error = Ui("M組數量必須為 11 組");
+                    return false;
+                }
+
+                bool[] seen = new bool[11];
+                foreach (object item in groupArray)
+                {
+                    var dict = item as Dictionary<string, object>;
+                    if (dict == null)
+                    {
+                        error = Ui("M組資料格式錯誤");
+                        return false;
+                    }
+                    GroupImportData data;
+                    if (!TryParseGroupImport(dict, out data, out error)) return false;
+                    if (seen[data.Group])
+                    {
+                        error = Ui("M組資料重複");
+                        return false;
+                    }
+                    seen[data.Group] = true;
+                    groups.Add(data);
+                }
+                groups.Sort((a, b) => a.Group.CompareTo(b.Group));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+        }
+
+        private bool TryParseGroupImport(Dictionary<string, object> dict, out GroupImportData data, out string error)
+        {
+            data = new GroupImportData();
+            error = null;
+            data.Group = GetJsonInt(dict, "group", -1);
+            if (data.Group < 0 || data.Group > 10)
+            {
+                error = Ui("M組編號錯誤");
+                return false;
+            }
+
+            data.Values = new int[14];
+            object rawObject;
+            object[] rawArray = null;
+            if (dict.TryGetValue("rawWords", out rawObject)) rawArray = rawObject as object[];
+            if (rawArray != null && rawArray.Length >= 14)
+            {
+                for (int i = 0; i < 14; i++) data.Values[i] = Convert.ToInt32(rawArray[i], CultureInfo.InvariantCulture);
+            }
+            else
+            {
+                data.Values[0] = GetJsonInt(dict, "vSetRaw", -1);
+                data.Values[1] = GetJsonInt(dict, "iSetRaw", -1);
+                data.Values[2] = GetJsonInt(dict, "lvpRaw", -1);
+                data.Values[3] = GetJsonInt(dict, "ovpRaw", -1);
+                data.Values[4] = GetJsonInt(dict, "ocpRaw", -1);
+                data.Values[5] = GetJsonInt(dict, "oppRaw", -1);
+                data.Values[13] = GetJsonInt(dict, "sIni", 0);
+            }
+
+            int[] required = new int[] { 0, 1, 2, 3, 4, 5, 13 };
+            foreach (int index in required)
+            {
+                if (data.Values[index] < 0 || data.Values[index] > 0xFFFF)
+                {
+                    error = "M" + data.Group.ToString(CultureInfo.InvariantCulture) + " " + Ui("參數範圍錯誤");
+                    return false;
+                }
+            }
+
+            object cutoffObject;
+            var cutoff = dict.TryGetValue("fullCharge", out cutoffObject) ? cutoffObject as Dictionary<string, object> : null;
+            if (cutoff != null)
+            {
+                data.HasFullCharge = true;
+                data.CurrentCutoffEnabled = GetJsonBool(cutoff, "currentEnabled", false);
+                data.VoltageCutoffEnabled = GetJsonBool(cutoff, "voltageEnabled", false);
+                data.CurrentCutoff = GetJsonDecimal(cutoff, "currentA", 0.100M);
+                data.TargetVoltage = GetJsonDecimal(cutoff, "targetV", 0M);
+                data.PollSeconds = GetJsonDecimal(cutoff, "pollSeconds", 60M);
+            }
+            return true;
+        }
+
+        private void QueueImportGroupSettings(List<GroupImportData> groups)
+        {
+            busy = true;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string failure = null;
+                try
+                {
+                    BeginInvoke((Action)(() => SetStatusText("匯入 M組參數")));
+                    foreach (GroupImportData group in groups)
+                    {
+                        int baseAddress = GroupBase(group.Group);
+                        int[] offsets = new int[] { 0, 1, 2, 3, 4, 5, 13 };
+                        foreach (int offset in offsets)
+                        {
+                            if (!WriteSingleVerified(baseAddress + offset, group.Values[offset], "M" + group.Group.ToString(CultureInfo.InvariantCulture) + " +" + offset.ToString(CultureInfo.InvariantCulture)))
+                            {
+                                failure = "M" + group.Group.ToString(CultureInfo.InvariantCulture) + " +" + offset.ToString(CultureInfo.InvariantCulture);
+                                return;
+                            }
+                        }
+
+                        byte[] readback = ExecuteWithRetry(BuildRead(baseAddress, 14), ExpectedReadLength(14));
+                        if (readback == null)
+                        {
+                            failure = "M" + group.Group.ToString(CultureInfo.InvariantCulture) + " " + Ui("讀回失敗");
+                            return;
+                        }
+                        foreach (int offset in offsets)
+                        {
+                            int readValue = Word(readback, 3 + offset * 2);
+                            if (readValue != group.Values[offset])
+                            {
+                                failure = "M" + group.Group.ToString(CultureInfo.InvariantCulture) + " +" + offset.ToString(CultureInfo.InvariantCulture) + " " + Ui("讀回不一致");
+                                return;
+                            }
+                        }
+
+                        if (group.HasFullCharge) SaveImportedFullChargeSettings(group);
+                        int captured = group.Group;
+                        BeginInvoke((Action)(() =>
+                        {
+                            SavePresetBaseline(captured, group.Values[0], group.Values[1]);
+                            UpdateQuickGroupButton(captured, group.Values[0] / 100.0, group.Values[1] / 1000.0, group.Values[13] != 0);
+                        }));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    failure = ex.Message;
+                }
+                finally
+                {
+                    busy = false;
+                    if (failure == null)
+                    {
+                        BeginInvoke((Action)(() =>
+                        {
+                            SetStatusText("M組參數已匯入");
+                            MessageBox.Show(this, Ui("匯入完成"), "SK150C", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        }));
+                    }
+                    else
+                    {
+                        string capturedFailure = failure;
+                        BeginInvoke((Action)(() =>
+                        {
+                            SetStatusText("匯入失敗");
+                            MessageBox.Show(this, capturedFailure, Ui("匯入失敗"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        }));
+                    }
+                }
+            });
+        }
+
+        private void SaveImportedFullChargeSettings(GroupImportData group)
+        {
+            using (RegistryKey key = Registry.CurrentUser.CreateSubKey(PresetRegistryPath(group.Group)))
+            {
+                key.SetValue("FullChargeCutoffCurrentEnabled", group.CurrentCutoffEnabled ? 1 : 0, RegistryValueKind.DWord);
+                key.SetValue("FullChargeCutoffCurrent", group.CurrentCutoff.ToString("0.000", CultureInfo.InvariantCulture), RegistryValueKind.String);
+                key.SetValue("FullChargeCutoffVoltageEnabled", group.VoltageCutoffEnabled ? 1 : 0, RegistryValueKind.DWord);
+                key.SetValue("FullChargeTargetVoltage", group.TargetVoltage.ToString("0.00", CultureInfo.InvariantCulture), RegistryValueKind.String);
+                key.SetValue("FullChargeVoltagePollSeconds", group.PollSeconds.ToString("0", CultureInfo.InvariantCulture), RegistryValueKind.String);
+            }
+            BeginInvoke((Action)(() => SetQuickGroupCutoffIndicators(group.Group, group.CurrentCutoffEnabled, group.VoltageCutoffEnabled)));
+        }
+
+        private void SavePresetBaseline(int group, int rawVoltage, int rawCurrent)
+        {
+            using (RegistryKey key = Registry.CurrentUser.CreateSubKey(PresetRegistryPath(group)))
+            {
+                key.SetValue("LastPresetVoltageRaw", rawVoltage, RegistryValueKind.DWord);
+                key.SetValue("LastPresetCurrentRaw", rawCurrent, RegistryValueKind.DWord);
+            }
+        }
+
+        private static int GetJsonInt(Dictionary<string, object> dict, string name, int fallback)
+        {
+            object value;
+            if (!dict.TryGetValue(name, out value) || value == null) return fallback;
+            int result;
+            return int.TryParse(Convert.ToString(value, CultureInfo.InvariantCulture), NumberStyles.Integer, CultureInfo.InvariantCulture, out result) ? result : fallback;
+        }
+
+        private static bool GetJsonBool(Dictionary<string, object> dict, string name, bool fallback)
+        {
+            object value;
+            if (!dict.TryGetValue(name, out value) || value == null) return fallback;
+            bool result;
+            if (bool.TryParse(Convert.ToString(value, CultureInfo.InvariantCulture), out result)) return result;
+            int intValue;
+            if (int.TryParse(Convert.ToString(value, CultureInfo.InvariantCulture), out intValue)) return intValue != 0;
+            return fallback;
+        }
+
+        private static decimal GetJsonDecimal(Dictionary<string, object> dict, string name, decimal fallback)
+        {
+            object value;
+            if (!dict.TryGetValue(name, out value) || value == null) return fallback;
+            decimal result;
+            return decimal.TryParse(Convert.ToString(value, CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture, out result) ? result : fallback;
+        }
+
+        private static string PrettyJson(string json)
+        {
+            var sb = new StringBuilder();
+            int indent = 0;
+            bool inString = false;
+            for (int i = 0; i < json.Length; i++)
+            {
+                char ch = json[i];
+                if (ch == '"' && (i == 0 || json[i - 1] != '\\')) inString = !inString;
+                if (!inString && (ch == '{' || ch == '['))
+                {
+                    sb.Append(ch).AppendLine();
+                    indent++;
+                    sb.Append(new string(' ', indent * 2));
+                }
+                else if (!inString && (ch == '}' || ch == ']'))
+                {
+                    sb.AppendLine();
+                    indent--;
+                    sb.Append(new string(' ', indent * 2)).Append(ch);
+                }
+                else if (!inString && ch == ',')
+                {
+                    sb.Append(ch).AppendLine();
+                    sb.Append(new string(' ', indent * 2));
+                }
+                else if (!inString && ch == ':')
+                {
+                    sb.Append(": ");
+                }
+                else
+                {
+                    sb.Append(ch);
+                }
+            }
+            return sb.ToString();
+        }
+
+        private sealed class GroupImportData
+        {
+            public int Group;
+            public int[] Values;
+            public bool HasFullCharge;
+            public bool CurrentCutoffEnabled;
+            public bool VoltageCutoffEnabled;
+            public decimal CurrentCutoff;
+            public decimal TargetVoltage;
+            public decimal PollSeconds;
+        }
+
         private void QueueEditGroup(int group)
         {
             if (serial == null || !serial.IsOpen)
@@ -1266,13 +1919,15 @@ namespace SK150CControl
             {
                 try
                 {
-                    var groupData = ExecuteWithRetry(BuildRead(GroupBase(group), 6), ExpectedReadLength(6));
+                    var groupData = ExecuteWithRetry(BuildRead(GroupBase(group), 14), ExpectedReadLength(14));
                     if (groupData != null)
                     {
                         editGroup = group;
                         BeginInvoke((Action)(() =>
                         {
                             UpdateGroupEditor(groupData, true);
+                            UpdateQuickGroupButton(group, Word(groupData, 3) / 100.0, Word(groupData, 5) / 1000.0, Word(groupData, 29) != 0);
+                            StyleOnOffToggle(siniToggleButton, Word(groupData, 29) != 0, ToggleKind.Danger);
                             editGroupLabel.Text = "正在編輯：M" + group;
                             SetStatusText("正在編輯 M" + group);
                         }));
@@ -1303,6 +1958,25 @@ namespace SK150CControl
             }
 
             SyncProtectionFromGroup();
+        }
+
+        private void SyncActiveGroupFromDevice()
+        {
+            var response = ExecuteWithRetry(BuildRead(0x001D, 1), ExpectedReadLength(1));
+            if (response == null) return;
+            int group = Word(response, 3);
+            if (group < 0 || group > 10) return;
+            if (group == currentGroup && group == activeQuickGroup) return;
+
+            currentGroup = group;
+            BeginInvoke((Action)(() =>
+            {
+                SetActiveQuickGroup(group);
+                LoadFullChargeSettings(group);
+                StyleOnOffToggle(siniToggleButton, quickGroupSini[group].GetValueOrDefault(false), ToggleKind.Danger);
+                editGroupLabel.Text = "保護寫入：目前 M 組";
+                SetStatusText("已同步 M" + group.ToString(CultureInfo.InvariantCulture));
+            }));
         }
 
         private void WriteSetOrGroup(int liveAddress, int groupOffset, int value, string label)
@@ -1465,6 +2139,149 @@ namespace SK150CControl
 
             var result = MessageBox.Show(this, message, title, MessageBoxButtons.OKCancel, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
             if (result == DialogResult.OK) QueueWriteRegister(address, 1, label);
+        }
+
+        private void OpenCalibrationWindow()
+        {
+            using (var form = new CalibrationForm(this))
+            {
+                form.ShowDialog(this);
+            }
+        }
+
+        public void QueueCalibrationVoltageSetup(decimal voltage)
+        {
+            int raw = (int)Math.Round((double)voltage * 100.0);
+            QueueCalibrationWork("校準準備 " + voltage.ToString("0.00", CultureInfo.InvariantCulture) + "V", delegate
+            {
+                if (!WriteSingleVerified(CurrentGroupBase() + 3, 2500, "校準 OVP 25V")) return false;
+                return WriteSingleVerified(0x0000, raw, "校準設定電壓");
+            });
+        }
+
+        public void QueueCalibrationCurrentSetup(decimal current)
+        {
+            int rawCurrent = (int)Math.Round((double)current * 1000.0);
+            QueueCalibrationWork("校準準備 " + current.ToString("0.000", CultureInfo.InvariantCulture) + "A", delegate
+            {
+                if (!WriteSingleVerified(CurrentGroupBase() + 4, 5000, "校準 OCP 5A")) return false;
+                if (!WriteSingleVerified(0x0000, 500, "校準設定 5V")) return false;
+                return WriteSingleVerified(0x0001, rawCurrent, "校準設定電流");
+            });
+        }
+
+        public void QueueCalibrationWrite(int address, decimal measuredValue, int scale, string label)
+        {
+            int raw = (int)Math.Round((double)measuredValue * scale);
+            QueueCalibrationWork(label + " 寫入", delegate
+            {
+                return WriteSingleVerified(address, raw, label);
+            });
+        }
+
+        public void QueueCalibrationWriteAndReadStatus(int address, decimal measuredValue, int scale, string label, Action<int?> statusCallback)
+        {
+            int raw = (int)Math.Round((double)measuredValue * scale);
+            QueueCalibrationWork(label + " 寫入並讀取狀態", delegate
+            {
+                if (!WriteSingleVerified(address, raw, label))
+                {
+                    BeginInvoke((Action)(() => statusCallback(-1)));
+                    return false;
+                }
+
+                byte[] response = ExecuteWithRetry(BuildRead(0x0022, 1), ExpectedReadLength(1));
+                if (response == null)
+                {
+                    BeginInvoke((Action)(() => statusCallback(null)));
+                    return false;
+                }
+
+                int status = Word(response, 3);
+                BeginInvoke((Action)(() =>
+                {
+                    Log("SYS", "calibration status 0022H = " + status.ToString(CultureInfo.InvariantCulture));
+                    statusCallback(status);
+                }));
+                return status == 1;
+            });
+        }
+
+        public void QueueCalibrationWriteThenVoltageSetup(int address, decimal measuredValue, int scale, string label, decimal nextVoltage)
+        {
+            int raw = (int)Math.Round((double)measuredValue * scale);
+            int nextRaw = (int)Math.Round((double)nextVoltage * 100.0);
+            QueueCalibrationWork(label + " 寫入，準備 " + nextVoltage.ToString("0.00", CultureInfo.InvariantCulture) + "V", delegate
+            {
+                if (!WriteSingleVerified(address, raw, label)) return false;
+                return WriteSingleVerified(0x0000, nextRaw, "校準設定電壓");
+            });
+        }
+
+        public void QueueCalibrationWriteThenCurrentSetup(int address, decimal measuredValue, int scale, string label, decimal nextCurrent)
+        {
+            int raw = (int)Math.Round((double)measuredValue * scale);
+            int nextRaw = (int)Math.Round((double)nextCurrent * 1000.0);
+            QueueCalibrationWork(label + " 寫入，準備 " + nextCurrent.ToString("0.000", CultureInfo.InvariantCulture) + "A", delegate
+            {
+                if (!WriteSingleVerified(address, raw, label)) return false;
+                if (!WriteSingleVerified(0x0000, 500, "校準設定 5V")) return false;
+                return WriteSingleVerified(0x0001, nextRaw, "校準設定電流");
+            });
+        }
+
+        public void QueueCalibrationStatusRead()
+        {
+            QueueCalibrationWork("讀取校準狀態", delegate
+            {
+                byte[] response = ExecuteWithRetry(BuildRead(0x0022, 1), ExpectedReadLength(1));
+                if (response == null) return false;
+                int status = Word(response, 3);
+                BeginInvoke((Action)(() =>
+                {
+                    SetStatusText("校準狀態 " + status.ToString(CultureInfo.InvariantCulture));
+                    Log("SYS", "calibration status 0022H = " + status.ToString(CultureInfo.InvariantCulture));
+                }));
+                return true;
+            });
+        }
+
+        private void QueueCalibrationWork(string label, Func<bool> work)
+        {
+            if (serial == null || !serial.IsOpen)
+            {
+                MessageBox.Show("尚未連線。", "SK150C", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            SetStatusText(label);
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                bool claimedBusy = false;
+                try
+                {
+                    int waited = 0;
+                    while (busy && waited < 3000)
+                    {
+                        Thread.Sleep(50);
+                        waited += 50;
+                    }
+                    if (busy)
+                    {
+                        BeginInvoke((Action)(() => SetStatusText("忙碌，校準命令未送出")));
+                        return;
+                    }
+
+                    busy = true;
+                    claimedBusy = true;
+                    bool ok = work();
+                    BeginInvoke((Action)(() => SetStatusText(ok ? label + " 已確認" : label + " 失敗")));
+                }
+                finally
+                {
+                    if (claimedBusy) busy = false;
+                }
+            });
         }
 
         private void SyncProtectionFromGroup()
@@ -2166,16 +2983,64 @@ namespace SK150CControl
 
         private void UpdateQuickGroupButton(int group, double? voltage, double? current)
         {
+            bool? sini = group >= 0 && group < quickGroupSini.Length ? quickGroupSini[group] : null;
+            UpdateQuickGroupButton(group, voltage, current, sini);
+        }
+
+        private void UpdateQuickGroupButton(int group, double? voltage, double? current, bool? siniOn)
+        {
             QuickGroupButton button;
             if (!quickGroupButtons.TryGetValue(group, out button)) return;
             if (group >= 0 && group < quickGroupVoltages.Length)
             {
                 quickGroupVoltages[group] = voltage;
                 quickGroupCurrents[group] = current;
+                quickGroupSini[group] = siniOn;
+                LoadQuickGroupCutoffIndicators(group);
             }
             button.SetValues(voltage.HasValue ? FormatGroupVoltage(voltage.Value) : "--V",
                 current.HasValue ? FormatGroupCurrent(current.Value) : "--A");
+            button.HasSiniWarning = siniOn.GetValueOrDefault(false);
+            button.HasCurrentCutoff = group >= 0 && group < quickGroupCurrentCutoff.Length && quickGroupCurrentCutoff[group].GetValueOrDefault(false);
+            button.HasVoltageCutoff = group >= 0 && group < quickGroupVoltageCutoff.Length && quickGroupVoltageCutoff[group].GetValueOrDefault(false);
             button.IsActive = group == activeQuickGroup;
+        }
+
+        private void LoadQuickGroupCutoffIndicators(int group)
+        {
+            if (group < 0 || group >= quickGroupCurrentCutoff.Length) return;
+            using (RegistryKey key = Registry.CurrentUser.CreateSubKey(PresetRegistryPath(group)))
+            {
+                quickGroupCurrentCutoff[group] = ReadRegistryBool(key, "FullChargeCutoffCurrentEnabled", false);
+                quickGroupVoltageCutoff[group] = ReadRegistryBool(key, "FullChargeCutoffVoltageEnabled", false);
+            }
+        }
+
+        private void SetQuickGroupCutoffIndicators(int group, bool currentEnabled, bool voltageEnabled)
+        {
+            if (group < 0 || group >= quickGroupCurrentCutoff.Length) return;
+            quickGroupCurrentCutoff[group] = currentEnabled;
+            quickGroupVoltageCutoff[group] = voltageEnabled;
+            QuickGroupButton button;
+            if (quickGroupButtons.TryGetValue(group, out button))
+            {
+                button.HasCurrentCutoff = currentEnabled;
+                button.HasVoltageCutoff = voltageEnabled;
+            }
+        }
+
+        private void UpdateQuickGroupCutoffIndicators(int group)
+        {
+            SetQuickGroupCutoffIndicators(group, fullChargeCurrentEnableBox.Checked, fullChargeVoltageEnableBox.Checked);
+        }
+
+        private void SetQuickGroupSini(int group, bool value)
+        {
+            if (group < 0 || group >= quickGroupSini.Length) return;
+            quickGroupSini[group] = value;
+            QuickGroupButton button;
+            if (quickGroupButtons.TryGetValue(group, out button)) button.HasSiniWarning = value;
+            if (group == currentGroup) StyleOnOffToggle(siniToggleButton, value, ToggleKind.Danger);
         }
 
         private void SetActiveQuickGroup(int group)
@@ -2277,6 +3142,7 @@ namespace SK150CControl
             bool english = languageBox.SelectedItem != null && languageBox.SelectedItem.ToString() == "English";
             Text = english ? "SK150C Modbus Control Console" : "SK150C Modbus 控制台";
             ApplyLanguageToControls(this, english);
+            SaveLanguageSelection();
             protectTile.SetText(ProtectText(currentProtectCode));
             protectTile.SetAlert(currentProtectCode != 0);
             if (currentProtectCode != 0) SetStatusText("保護：" + ProtectText(currentProtectCode));
@@ -2340,7 +3206,9 @@ namespace SK150CControl
                 { "已調用", "Called" },
                 { "並同步", "and synced" },
                 { "寫入", "write" },
-                { "讀回", "readback" }
+                { "讀回", "readback" },
+                { "將寫入", "will write" },
+                { "。請確認外部表具量測值就是目前輸入值。", ". Please confirm the external meter value matches the value entered." }
             };
             int from = english ? 0 : 1;
             int to = english ? 1 : 0;
@@ -2380,10 +3248,32 @@ namespace SK150CControl
                 { "維護功能", "Maintenance" },
                 { "重啟", "Restart" },
                 { "恢復出廠", "Factory Reset" },
-                { "校準/清零", "Calibrate/Zero" },
+                { "校準", "Calibration" },
+                { "M組參數", "M Group Params" },
+                { "匯出 M組", "Export M" },
+                { "匯入 M組", "Import M" },
+                { "匯出 M組參數", "Export M Group Params" },
+                { "匯入 M組參數", "Import M Group Params" },
+                { "M組參數已匯出", "M group params exported" },
+                { "M組參數已匯入", "M group params imported" },
+                { "匯出完成", "Export complete" },
+                { "匯出失敗", "Export failed" },
+                { "匯入完成", "Import complete" },
+                { "匯入失敗", "Import failed" },
+                { "匯入格式錯誤", "Import format error" },
+                { "JSON 根格式錯誤", "Invalid JSON root" },
+                { "不是 SK150C M組參數檔", "Not an SK150C M group parameter file" },
+                { "缺少 groups 欄位", "Missing groups field" },
+                { "M組數量必須為 11 組", "M group count must be 11" },
+                { "M組資料格式錯誤", "Invalid M group data format" },
+                { "M組編號錯誤", "Invalid M group number" },
+                { "M組資料重複", "Duplicate M group data" },
+                { "參數範圍錯誤", "parameter out of range" },
+                { "讀回不一致", "readback mismatch" },
                 { "語言", "Language" },
                 { "待命", "Standby" },
                 { "未連線", "Disconnected" },
+                { "尚未連線。", "Not connected." },
                 { "已連線", "Connected" },
                 { "連線失敗", "Connect Failed" },
                 { "正常", "Normal" },
@@ -2414,6 +3304,7 @@ namespace SK150CControl
                 { "OVP 過壓保護", "OVP Protection" },
                 { "OCP 過流保護", "OCP Protection" },
                 { "OPP 過功率保護", "OPP Protection" },
+                { "S-INI 調用後輸出", "S-INI Output After Call" },
                 { "輸出開關", "Output Switch" },
                 { "快捷組", "Presets" },
                 { "刷新 M0-M10", "Refresh M0-M10" },
@@ -2423,7 +3314,7 @@ namespace SK150CControl
                 { "讀取中", "Reading" },
                 { "讀取失敗", "Read Failed" },
                 { "調用中", "Calling" },
-                { "校準/清零", "Calibrate/Zero" },
+                { "校準", "Calibration" },
                 { "TX / RX 通訊紀錄", "TX / RX Log" }
                 ,
                 { "常用", "Common" },
@@ -2437,7 +3328,41 @@ namespace SK150CControl
                 { "套用電壓", "Apply V" },
                 { "輪詢時間", "Poll Interval" },
                 { "套用輪詢時間", "Apply Interval" },
-                { "套用", "Apply" }
+                { "套用", "Apply" },
+                { "SK150C 校準", "SK150C Calibration" },
+                { "校準電壓", "Voltage Calibration" },
+                { "校準電流", "Current Calibration" },
+                { "請先選擇校準類別", "Select calibration type" },
+                { "選擇後會顯示實測值輸入框，並立即送出第一段準備值。", "After selection, the measured-value input appears and the first preparation command is sent." },
+                { "實測值", "Measured Value" },
+                { "確認並進入下一段", "Confirm & Next" },
+                { "確認完成校準", "Finish Calibration" },
+                { "關閉", "Close" },
+                { "請確認已接好高精度電壓表與電流表。校準會改寫從機校準資料；若為降壓型電源，請確認輸入電壓高於 28V。電流校準時，請將萬用表切到電流檔，表筆插入 10A/20A 孔位，依畫面提示輸入實測值。", "Confirm that high-precision voltage and current meters are connected. Calibration will rewrite device calibration data. For buck supplies, make sure input voltage is above 28V. For current calibration, set the multimeter to current mode, use the 10A/20A jack, and enter the measured value shown by the meter." },
+                { "請確認校準工具與接線正確。自行校準錯誤造成的問題，請自行負責。", "Confirm calibration tools and wiring are correct. Incorrect manual calibration is your responsibility." },
+                { "目前已送出準備值，請等待從機輸出穩定後輸入外部表具讀值。", "Preparation value sent. Wait for device output to stabilize, then enter the external meter reading." },
+                { "確認校準寫入", "Confirm Calibration Write" },
+                { "最後一步已送出，正在讀取校準結果...", "Final step sent. Reading calibration result..." },
+                { "校準成功", "Calibration succeeded" },
+                { "校準失敗", "Calibration failed" },
+                { "校準寫入失敗，請檢查連線與從機狀態。", "Calibration write failed. Check connection and device status." },
+                { "校準狀態：", "Calibration status: " },
+                { "校準狀態讀取失敗，請觀察從機顯示。", "Failed to read calibration status. Check the device display." },
+                { "校準結果", "Calibration Result" },
+                { "步驟 1/2：5V 實測輸入", "Step 1/2: 5V measured input" },
+                { "步驟 2/2：25V 實測輸入", "Step 2/2: 25V measured input" },
+                { "步驟 1/2：1A 實測輸入", "Step 1/2: 1A measured input" },
+                { "步驟 2/2：5A 實測輸入", "Step 2/2: 5A measured input" },
+                { "請輸入目前實測輸出電壓。", "Enter the currently measured output voltage." },
+                { "請輸入目前實測輸出電流。", "Enter the currently measured output current." },
+                { "5V 電壓校準", "5V voltage calibration" },
+                { "25V 電壓校準", "25V voltage calibration" },
+                { "1A 電流校準", "1A current calibration" },
+                { "5A 電流校準", "5A current calibration" },
+                { "滿電截止電流說明", "Cutoff Current Help" },
+                { "滿電截止電壓說明", "Cutoff Voltage Help" },
+                { "充電接近滿電時，輸出電流會逐漸下降。\r\n當電流低於指定目標後，程式會自動關閉輸出。", "When charging is nearly full, output current gradually drops.\r\nWhen current falls below the target, the app automatically turns output off." },
+                { "使用前需將探頭接在電池輸出端，確保能量測到電池正負極電壓。\r\n此功能會依設定週期偵測電壓，當電壓高於設定目標時自動關閉輸出。", "Before use, connect the probe to the battery output so the battery terminal voltage can be measured.\r\nThis feature checks voltage at the set interval and automatically turns output off when voltage is above the target." }
             };
 
             int from = english ? 0 : 1;
@@ -2454,12 +3379,12 @@ namespace SK150CControl
             return false;
         }
 
-        private bool IsEnglishUi()
+        public bool IsEnglishUi()
         {
             return languageBox.SelectedItem != null && languageBox.SelectedItem.ToString() == "English";
         }
 
-        private string Ui(string zh)
+        public string Ui(string zh)
         {
             return TranslateUiText(zh, IsEnglishUi());
         }
@@ -2598,6 +3523,388 @@ namespace SK150CControl
             value.Font = new Font("Consolas", 11F, FontStyle.Bold);
             flow.Controls.Add(l, 0, row);
             flow.Controls.Add(value, 1, row);
+        }
+    }
+
+    public sealed class CalibrationForm : Form
+    {
+        private enum CalibrationMode
+        {
+            None,
+            Voltage,
+            Current
+        }
+
+        private readonly MainForm owner;
+        private readonly NumericUpDown voltage5Box = new NumericUpDown();
+        private readonly NumericUpDown voltage25Box = new NumericUpDown();
+        private readonly NumericUpDown current1Box = new NumericUpDown();
+        private readonly NumericUpDown current5Box = new NumericUpDown();
+        private readonly Panel stepPanel = new Panel();
+        private readonly Label titleLabel = new Label();
+        private readonly Label stepLabel = new Label();
+        private readonly Label promptLabel = new Label();
+        private readonly Label resultLabel = new Label();
+        private readonly Button voltageModeButton = new Button();
+        private readonly Button currentModeButton = new Button();
+        private readonly Button confirmButton = new Button();
+        private readonly Button closeButton = new Button();
+        private CalibrationMode mode = CalibrationMode.None;
+        private int step;
+
+        public CalibrationForm(MainForm ownerForm)
+        {
+            owner = ownerForm;
+            Text = T("SK150C 校準");
+            Width = 590;
+            Height = 560;
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            StartPosition = FormStartPosition.CenterParent;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            Font = new Font("Microsoft JhengHei UI", 9F);
+            BackColor = Color.White;
+            BuildUi();
+            RenderIdle();
+        }
+
+        private void BuildUi()
+        {
+            ConfigureNumber(voltage5Box, 0.50M, 40.00M, 5.00M, 2, "V");
+            ConfigureNumber(voltage25Box, 0.50M, 40.00M, 25.00M, 2, "V");
+            ConfigureNumber(current1Box, 0.001M, 8.000M, 1.000M, 3, "A");
+            ConfigureNumber(current5Box, 0.001M, 8.000M, 5.000M, 3, "A");
+
+            var root = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                Padding = new Padding(14),
+                ColumnCount = 1,
+                RowCount = 5
+            };
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 76));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 74));
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+            Controls.Add(root);
+
+            var warning = new Label
+            {
+                Dock = DockStyle.Fill,
+                Text = T("請確認已接好高精度電壓表與電流表。校準會改寫從機校準資料；若為降壓型電源，請確認輸入電壓高於 28V。電流校準時，請將萬用表切到電流檔，表筆插入 10A/20A 孔位，依畫面提示輸入實測值。"),
+                ForeColor = Color.FromArgb(185, 28, 28),
+                Font = new Font("Microsoft JhengHei UI", 9F, FontStyle.Bold),
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+            root.Controls.Add(warning, 0, 0);
+
+            var modeRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Padding = new Padding(0, 8, 0, 8) };
+            modeRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            modeRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            voltageModeButton.Text = T("校準電壓");
+            currentModeButton.Text = T("校準電流");
+            voltageModeButton.Dock = DockStyle.Fill;
+            currentModeButton.Dock = DockStyle.Fill;
+            voltageModeButton.Font = new Font("Microsoft JhengHei UI", 12F, FontStyle.Bold);
+            currentModeButton.Font = new Font("Microsoft JhengHei UI", 12F, FontStyle.Bold);
+            voltageModeButton.Click += delegate { StartVoltageCalibration(); };
+            currentModeButton.Click += delegate { StartCurrentCalibration(); };
+            modeRow.Controls.Add(voltageModeButton, 0, 0);
+            modeRow.Controls.Add(currentModeButton, 1, 0);
+            root.Controls.Add(modeRow, 0, 1);
+
+            stepPanel.Dock = DockStyle.Fill;
+            stepPanel.BackColor = Color.FromArgb(250, 251, 252);
+            stepPanel.Padding = new Padding(16);
+            stepPanel.Paint += delegate(object sender, PaintEventArgs e)
+            {
+                using (var pen = new Pen(Color.FromArgb(214, 220, 226)))
+                {
+                    e.Graphics.DrawRectangle(pen, 0, 0, stepPanel.Width - 1, stepPanel.Height - 1);
+                }
+            };
+            root.Controls.Add(stepPanel, 0, 2);
+
+            var note = new Label
+            {
+                Dock = DockStyle.Fill,
+                Text = T("請確認校準工具與接線正確。自行校準錯誤造成的問題，請自行負責。"),
+                ForeColor = Color.FromArgb(92, 103, 115),
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+            root.Controls.Add(note, 0, 3);
+
+            var bottom = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(0, 6, 0, 0) };
+            closeButton.Text = T("關閉");
+            closeButton.Width = 88;
+            closeButton.Height = 30;
+            closeButton.Click += delegate { Close(); };
+            bottom.Controls.Add(closeButton);
+            root.Controls.Add(bottom, 0, 4);
+        }
+
+        private void StartVoltageCalibration()
+        {
+            mode = CalibrationMode.Voltage;
+            step = 0;
+            owner.QueueCalibrationVoltageSetup(5.00M);
+            RenderStep();
+        }
+
+        private void StartCurrentCalibration()
+        {
+            mode = CalibrationMode.Current;
+            step = 0;
+            owner.QueueCalibrationCurrentSetup(1.000M);
+            RenderStep();
+        }
+
+        private void RenderIdle()
+        {
+            mode = CalibrationMode.None;
+            step = 0;
+            StyleModeButtons();
+            stepPanel.Controls.Clear();
+
+            var idle = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
+            idle.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+            idle.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+            idle.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+
+            titleLabel.Text = T("請先選擇校準類別");
+            titleLabel.Font = new Font("Microsoft JhengHei UI", 16F, FontStyle.Bold);
+            titleLabel.ForeColor = Color.FromArgb(31, 38, 46);
+            titleLabel.TextAlign = ContentAlignment.BottomCenter;
+            titleLabel.Dock = DockStyle.Fill;
+            var idleHint = new Label
+            {
+                Text = T("選擇後會顯示實測值輸入框，並立即送出第一段準備值。"),
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleCenter,
+                ForeColor = Color.FromArgb(92, 103, 115)
+            };
+            idle.Controls.Add(titleLabel, 0, 0);
+            idle.Controls.Add(idleHint, 0, 1);
+            stepPanel.Controls.Add(idle);
+        }
+
+        private void RenderStep()
+        {
+            StyleModeButtons();
+            stepPanel.Controls.Clear();
+
+            NumericUpDown input = CurrentInput();
+            string unit = Convert.ToString(input.Tag, CultureInfo.InvariantCulture);
+            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5 };
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 72));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+
+            titleLabel.Text = mode == CalibrationMode.Voltage ? T("校準電壓") : T("校準電流");
+            titleLabel.Font = new Font("Microsoft JhengHei UI", 16F, FontStyle.Bold);
+            titleLabel.ForeColor = mode == CalibrationMode.Voltage ? Color.FromArgb(36, 150, 96) : Color.FromArgb(184, 134, 11);
+            titleLabel.TextAlign = ContentAlignment.MiddleLeft;
+            titleLabel.Dock = DockStyle.Fill;
+
+            stepLabel.Text = StepTitle();
+            stepLabel.Font = new Font("Microsoft JhengHei UI", 10F, FontStyle.Bold);
+            stepLabel.ForeColor = Color.FromArgb(42, 48, 56);
+            stepLabel.TextAlign = ContentAlignment.MiddleLeft;
+            stepLabel.Dock = DockStyle.Fill;
+
+            promptLabel.Text = StepPrompt();
+            promptLabel.Font = new Font("Microsoft JhengHei UI", 10F);
+            promptLabel.ForeColor = Color.FromArgb(62, 70, 80);
+            promptLabel.TextAlign = ContentAlignment.MiddleLeft;
+            promptLabel.Dock = DockStyle.Fill;
+
+            var inputRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, Padding = new Padding(0, 10, 0, 10) };
+            inputRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 72));
+            inputRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            inputRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 46));
+            inputRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 172));
+            var inputTitle = new Label
+            {
+                Text = T("實測值"),
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Font = new Font("Microsoft JhengHei UI", 11F, FontStyle.Bold),
+                ForeColor = Color.FromArgb(42, 48, 56)
+            };
+            input.Dock = DockStyle.Fill;
+            input.MinimumSize = new Size(150, 42);
+            input.BackColor = Color.White;
+            input.ForeColor = mode == CalibrationMode.Voltage ? Color.FromArgb(36, 150, 96) : Color.FromArgb(184, 134, 11);
+            var unitLabel = new Label { Text = unit, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, Font = new Font("Microsoft JhengHei UI", 13F, FontStyle.Bold) };
+            confirmButton.Text = step == 0 ? T("確認並進入下一段") : T("確認完成校準");
+            confirmButton.Dock = DockStyle.Fill;
+            confirmButton.BackColor = Color.FromArgb(185, 28, 28);
+            confirmButton.ForeColor = Color.White;
+            confirmButton.Font = new Font("Microsoft JhengHei UI", 10F, FontStyle.Bold);
+            confirmButton.Click -= ConfirmButtonClick;
+            confirmButton.Click += ConfirmButtonClick;
+            inputRow.Controls.Add(inputTitle, 0, 0);
+            inputRow.Controls.Add(input, 1, 0);
+            inputRow.Controls.Add(unitLabel, 2, 0);
+            inputRow.Controls.Add(confirmButton, 3, 0);
+
+            resultLabel.Dock = DockStyle.Fill;
+            resultLabel.Text = T("目前已送出準備值，請等待從機輸出穩定後輸入外部表具讀值。");
+            resultLabel.ForeColor = Color.FromArgb(92, 103, 115);
+            resultLabel.TextAlign = ContentAlignment.MiddleLeft;
+
+            layout.Controls.Add(titleLabel, 0, 0);
+            layout.Controls.Add(stepLabel, 0, 1);
+            layout.Controls.Add(promptLabel, 0, 2);
+            layout.Controls.Add(inputRow, 0, 3);
+            layout.Controls.Add(resultLabel, 0, 4);
+            stepPanel.Controls.Add(layout);
+            input.Focus();
+            input.Select(0, input.Text.Length);
+        }
+
+        private void ConfirmButtonClick(object sender, EventArgs e)
+        {
+            ConfirmCurrentStep();
+        }
+
+        private void ConfirmCurrentStep()
+        {
+            if (mode == CalibrationMode.None) return;
+            NumericUpDown input = CurrentInput();
+            string label = StepLabelForWrite();
+            int address = StepAddress();
+            int scale = mode == CalibrationMode.Voltage ? 100 : 1000;
+            string message = T(label) + " " + T("將寫入") + " 0x" + address.ToString("X4", CultureInfo.InvariantCulture) + T("。請確認外部表具量測值就是目前輸入值。");
+            DialogResult result = MessageBox.Show(this, message, T("確認校準寫入"), MessageBoxButtons.OKCancel, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+            if (result != DialogResult.OK) return;
+
+            if (mode == CalibrationMode.Voltage && step == 0)
+            {
+                owner.QueueCalibrationWriteThenVoltageSetup(address, input.Value, scale, label, 25.00M);
+                step = 1;
+                RenderStep();
+                return;
+            }
+
+            if (mode == CalibrationMode.Current && step == 0)
+            {
+                owner.QueueCalibrationWriteThenCurrentSetup(address, input.Value, scale, label, 5.000M);
+                step = 1;
+                RenderStep();
+                return;
+            }
+
+            resultLabel.ForeColor = Color.FromArgb(92, 103, 115);
+            resultLabel.Text = T("最後一步已送出，正在讀取校準結果...");
+            confirmButton.Enabled = false;
+            owner.QueueCalibrationWriteAndReadStatus(address, input.Value, scale, label, delegate(int? status)
+            {
+                confirmButton.Enabled = true;
+                ShowCalibrationResult(status);
+            });
+        }
+
+        private void ShowCalibrationResult(int? status)
+        {
+            string text;
+            MessageBoxIcon icon;
+            if (status.HasValue && status.Value == 1)
+            {
+                text = T("校準成功");
+                resultLabel.ForeColor = Color.FromArgb(36, 150, 96);
+                icon = MessageBoxIcon.Information;
+            }
+            else if (status.HasValue && status.Value == 2)
+            {
+                text = T("校準失敗");
+                resultLabel.ForeColor = Color.FromArgb(185, 28, 28);
+                icon = MessageBoxIcon.Warning;
+            }
+            else if (status.HasValue && status.Value == -1)
+            {
+                text = T("校準寫入失敗，請檢查連線與從機狀態。");
+                resultLabel.ForeColor = Color.FromArgb(185, 28, 28);
+                icon = MessageBoxIcon.Warning;
+            }
+            else if (status.HasValue)
+            {
+                text = T("校準狀態：") + status.Value.ToString(CultureInfo.InvariantCulture);
+                resultLabel.ForeColor = Color.FromArgb(184, 134, 11);
+                icon = MessageBoxIcon.Information;
+            }
+            else
+            {
+                text = T("校準狀態讀取失敗，請觀察從機顯示。");
+                resultLabel.ForeColor = Color.FromArgb(185, 28, 28);
+                icon = MessageBoxIcon.Warning;
+            }
+
+            resultLabel.Text = text;
+            MessageBox.Show(this, text, T("校準結果"), MessageBoxButtons.OK, icon);
+        }
+
+        private NumericUpDown CurrentInput()
+        {
+            if (mode == CalibrationMode.Voltage) return step == 0 ? voltage5Box : voltage25Box;
+            return step == 0 ? current1Box : current5Box;
+        }
+
+        private string StepTitle()
+        {
+            if (mode == CalibrationMode.Voltage) return step == 0 ? T("步驟 1/2：5V 實測輸入") : T("步驟 2/2：25V 實測輸入");
+            return step == 0 ? T("步驟 1/2：1A 實測輸入") : T("步驟 2/2：5A 實測輸入");
+        }
+
+        private string StepPrompt()
+        {
+            if (mode == CalibrationMode.Voltage) return T("請輸入目前實測輸出電壓。");
+            return T("請輸入目前實測輸出電流。");
+        }
+
+        private string StepLabelForWrite()
+        {
+            if (mode == CalibrationMode.Voltage) return step == 0 ? "5V 電壓校準" : "25V 電壓校準";
+            return step == 0 ? "1A 電流校準" : "5A 電流校準";
+        }
+
+        private string T(string zh)
+        {
+            return owner.Ui(zh);
+        }
+
+        private int StepAddress()
+        {
+            if (mode == CalibrationMode.Voltage) return step == 0 ? 0x0023 : 0x0024;
+            return step == 0 ? 0x0026 : 0x0027;
+        }
+
+        private void StyleModeButtons()
+        {
+            StyleModeButton(voltageModeButton, mode == CalibrationMode.Voltage, Color.FromArgb(36, 150, 96));
+            StyleModeButton(currentModeButton, mode == CalibrationMode.Current, Color.FromArgb(184, 134, 11));
+        }
+
+        private static void StyleModeButton(Button button, bool active, Color color)
+        {
+            button.BackColor = active ? color : SystemColors.Control;
+            button.ForeColor = active ? Color.White : Color.FromArgb(31, 38, 46);
+        }
+
+        private static void ConfigureNumber(NumericUpDown box, decimal min, decimal max, decimal value, int decimals, string unit)
+        {
+            box.Minimum = min;
+            box.Maximum = max;
+            box.Value = value;
+            box.DecimalPlaces = decimals;
+            box.Increment = decimals == 3 ? 0.001M : 0.01M;
+            box.TextAlign = HorizontalAlignment.Right;
+            box.Font = new Font("Consolas", 20F, FontStyle.Bold);
+            box.BorderStyle = BorderStyle.FixedSingle;
+            box.Tag = unit;
         }
     }
 
@@ -2950,6 +4257,9 @@ namespace SK150CControl
         private bool hovering;
         private bool pressed;
         private bool isActive;
+        private bool hasSiniWarning;
+        private bool hasCurrentCutoff;
+        private bool hasVoltageCutoff;
 
         public QuickGroupButton()
         {
@@ -2980,6 +4290,39 @@ namespace SK150CControl
             {
                 if (isActive == value) return;
                 isActive = value;
+                Invalidate();
+            }
+        }
+
+        public bool HasSiniWarning
+        {
+            get { return hasSiniWarning; }
+            set
+            {
+                if (hasSiniWarning == value) return;
+                hasSiniWarning = value;
+                Invalidate();
+            }
+        }
+
+        public bool HasCurrentCutoff
+        {
+            get { return hasCurrentCutoff; }
+            set
+            {
+                if (hasCurrentCutoff == value) return;
+                hasCurrentCutoff = value;
+                Invalidate();
+            }
+        }
+
+        public bool HasVoltageCutoff
+        {
+            get { return hasVoltageCutoff; }
+            set
+            {
+                if (hasVoltageCutoff == value) return;
+                hasVoltageCutoff = value;
                 Invalidate();
             }
         }
@@ -3052,6 +4395,9 @@ namespace SK150CControl
             Rectangle leftRect = new Rectangle(5, 0, Math.Max(28, Width / 2 - 6), Height);
             Rectangle rightTop = new Rectangle(Math.Max(38, Width / 2 - 4), 1, Math.Max(20, Width - Math.Max(38, Width / 2 - 4) - 5), Height / 2);
             Rectangle rightBottom = new Rectangle(rightTop.Left, Height / 2 - 1, rightTop.Width, Height / 2);
+            DrawStatusDot(e.Graphics, hasSiniWarning, Color.FromArgb(220, 38, 38), Color.FromArgb(153, 27, 27), rightTop.Top + Math.Max(2, (rightTop.Height / 2) - 3));
+            DrawStatusDot(e.Graphics, hasCurrentCutoff, Color.FromArgb(184, 134, 11), Color.FromArgb(146, 101, 8), leftRect.Top + Math.Max(2, (leftRect.Height / 2) - 3));
+            DrawStatusDot(e.Graphics, hasVoltageCutoff, Color.FromArgb(36, 150, 96), Color.FromArgb(23, 78, 57), rightBottom.Top + Math.Max(2, (rightBottom.Height / 2) - 3));
 
             using (var groupFont = FitFont(e.Graphics, "M" + group.ToString(CultureInfo.InvariantCulture), 12F, FontStyle.Bold, leftRect.Size))
             using (var valueFont = FitFont(e.Graphics, voltageText.Length >= currentText.Length ? voltageText : currentText, 10F, FontStyle.Bold, rightTop.Size))
@@ -3062,6 +4408,18 @@ namespace SK150CControl
                 DrawText(e.Graphics, "M" + group.ToString(CultureInfo.InvariantCulture), groupFont, groupBrush, leftRect, ContentAlignment.MiddleCenter);
                 DrawText(e.Graphics, voltageText, valueFont, voltageBrush, rightTop, ContentAlignment.MiddleRight);
                 DrawText(e.Graphics, currentText, valueFont, currentBrush, rightBottom, ContentAlignment.MiddleRight);
+            }
+        }
+
+        private static void DrawStatusDot(Graphics g, bool visible, Color fillColor, Color borderColor, int y)
+        {
+            if (!visible) return;
+            Rectangle dot = new Rectangle(4, y, 5, 5);
+            using (var brush = new SolidBrush(fillColor))
+            using (var pen = new Pen(borderColor))
+            {
+                g.FillEllipse(brush, dot);
+                g.DrawEllipse(pen, dot);
             }
         }
 
@@ -3137,7 +4495,7 @@ namespace SK150CControl
             textBox.ForeColor = accent;
             textBox.TextChanged += delegate
             {
-                if (!suppressTextChanged && textBox.Focused) MarkDirty();
+                if (!suppressTextChanged && textBox.Focused && TextDiffersFromCurrentValue()) MarkDirty();
             };
             textBox.Enter += delegate
             {
@@ -3249,7 +4607,9 @@ namespace SK150CControl
         {
             if (value < minimum) value = minimum;
             if (value > maximum) value = maximum;
-            currentValue = decimal.Round(value, decimalPlaces);
+            decimal rounded = decimal.Round(value, decimalPlaces);
+            bool changed = rounded != currentValue;
+            currentValue = rounded;
             suppressTextChanged = true;
             try
             {
@@ -3259,7 +4619,7 @@ namespace SK150CControl
             {
                 suppressTextChanged = false;
             }
-            if (userChange) MarkDirty();
+            if (userChange && changed) MarkDirty();
             else SetDirty(false);
         }
 
@@ -3281,6 +4641,18 @@ namespace SK150CControl
             {
                 SetValue(currentValue, userChange);
             }
+        }
+
+        private bool TextDiffersFromCurrentValue()
+        {
+            decimal parsed;
+            if (!decimal.TryParse(textBox.Text.Trim(), NumberStyles.Number, CultureInfo.InvariantCulture, out parsed) &&
+                !decimal.TryParse(textBox.Text.Trim(), NumberStyles.Number, CultureInfo.CurrentCulture, out parsed))
+                return true;
+            if (parsed < minimum) parsed = minimum;
+            if (parsed > maximum) parsed = maximum;
+            parsed = decimal.Round(parsed, decimalPlaces);
+            return parsed != currentValue;
         }
 
         private void MarkDirty()

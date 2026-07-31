@@ -1,12 +1,12 @@
 {
   "schema": 1,
-  "latestVersion": "1.0.0",
-  "minimumVersion": "1.0.0",
+  "latestVersion": "1.1.0",
+  "minimumVersion": "1.1.0",
   "securityBaseline": 1,
   "minimumSecurityBaseline": 1,
   "mandatoryUpdate": true,
   "releaseUrl": "https://github.com/ifoundu-tw/SK150C-Control/releases/latest",
-  "downloadUrl": "https://github.com/ifoundu-tw/SK150C-Control/releases/latest/download/SK150C-WEB-v1.0.0.zip",
-  "sha256": "7B403BCCF589F6A516F0528E7A8CFE89BED26EBD5064490F78E7DB3B43AD4AA2",
+  "downloadUrl": "https://github.com/ifoundu-tw/SK150C-Control/releases/latest/download/SK150C-WEB-v1.1.0.zip",
+  "sha256": "7ED8EC5EEBF01D1D5B64CB754C44AD706CE8C01C5BE33B41E74B3340F944E9F8",
   "message": "為確保功能與操作一致，請使用最新正式版本。"
 }

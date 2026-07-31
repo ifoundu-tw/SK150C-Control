@@ -8,15 +8,15 @@ SK150C Windows Modbus 控制台，支援 ZK-SK150C 電源控制、M0–M10 快�
 
 | 功能 | 入口 |
 |---|---|
-| Windows 最新版 | **[下載 SK150C v1.1.0](https://github.com/ifoundu-tw/SK150C-Control/releases/latest)** |
+| Windows 最新版 | **[下載 SK150C v1.2.0](https://github.com/ifoundu-tw/SK150C-Control/releases/latest)** |
 | 手機 WEB 遠端控制 | **[開啟 https://sk150c-remote.web.app](https://sk150c-remote.web.app)** |
 | 版本政策 | [`version-policy.json`](version-policy.json) |
 
-目前正式版本：`v1.1.0`。舊版已停止公開與支援。
+目前正式版本：`v1.2.0`。舊版已停止公開與支援。
 
 ## Windows 安裝
 
-1. 從 [Latest Release](https://github.com/ifoundu-tw/SK150C-Control/releases/latest) 下載 `SK150C-WEB-v1.1.0.zip`。
+1. 從 [Latest Release](https://github.com/ifoundu-tw/SK150C-Control/releases/latest) 下載 `SK150C-WEB-v1.2.0.zip`。
 2. 將 ZIP 完整解壓縮到一個可寫入的資料夾，不要直接在 ZIP 內執行。
 3. 保持下列兩個檔案在同一資料夾：
 

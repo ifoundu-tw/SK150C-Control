@@ -1,0 +1,5 @@
+# Release binaries are published as GitHub Release assets.
+*.exe
+*.zip
+*.pdb
+*.log

@@ -14,6 +14,8 @@ SK150C Windows Modbus 控制台，支援 ZK-SK150C 電源控制、M0–M10 快�
 
 目前正式版本：`v1.2.1`。正式採用緊湊新版布局，舊版已停止公開與支援。
 
+本次 v1.2.1 覆蓋更新加入 37 個語言／地區選項，以及淺色／深色外觀（桌機在「連線／診斷」頁下方設定）。部分長篇提示採用機器翻譯。已安裝舊 v1.2.1 的使用者請重新下載，關閉程式後替換檔案；同版號不會觸發自動更新。
+
 ## Windows 安裝
 
 1. 從 [Latest Release](https://github.com/ifoundu-tw/SK150C-Control/releases/latest) 下載 `SK150C-WEB-v1.2.1.zip`。

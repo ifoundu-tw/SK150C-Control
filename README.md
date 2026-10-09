@@ -8,15 +8,15 @@ SK150C Windows Modbus 控制台，支援 ZK-SK150C 電源控制、M0–M10 快�
 
 | 功能 | 入口 |
 |---|---|
-| Windows 最新版 | **[下載 SK150C v1.2.0](https://github.com/ifoundu-tw/SK150C-Control/releases/latest)** |
+| Windows 最新版 | **[下載 SK150C v1.2.1](https://github.com/ifoundu-tw/SK150C-Control/releases/latest)** |
 | 手機 WEB 遠端控制 | **[開啟 https://sk150c-remote.web.app](https://sk150c-remote.web.app)** |
 | 版本政策 | [`version-policy.json`](version-policy.json) |
 
-目前正式版本：`v1.2.0`。舊版已停止公開與支援。
+目前正式版本：`v1.2.1`。正式採用緊湊新版布局，舊版已停止公開與支援。
 
 ## Windows 安裝
 
-1. 從 [Latest Release](https://github.com/ifoundu-tw/SK150C-Control/releases/latest) 下載 `SK150C-WEB-v1.2.0.zip`。
+1. 從 [Latest Release](https://github.com/ifoundu-tw/SK150C-Control/releases/latest) 下載 `SK150C-WEB-v1.2.1.zip`。
 2. 將 ZIP 完整解壓縮到一個可寫入的資料夾，不要直接在 ZIP 內執行。
 3. 保持下列兩個檔案在同一資料夾：
 
@@ -32,13 +32,13 @@ SK150C Windows Modbus 控制台，支援 ZK-SK150C 電源控制、M0–M10 快�
 ## 電腦端基本操作
 
 1. 使用 USB 轉 TTL/UART 連接 ZK-SK150C，再開啟程式。
-2. 於左側「連線設定」選擇 COM 埠。
+2. 程式啟動時自動連線最高 COM 埠；也可在右側「連線／診斷」分頁選擇 COM 埠。
 3. 一般通訊設定為 `115200` baud、`8N1`、站號 `1`；若設備已改過參數，請以設備實際設定為準。
 4. 按「掃描」更新 COM 清單，再按「連線」。
 5. 連線後可設定電壓、電流、OVP/OCP、充電截止條件與 M0–M10 快捷組。
 6. 確認電源、負載與保護參數後，才使用右下角 `ON` / `OFF` 控制輸出。
 
-![SK150C Windows 控制台](docs/images/sk150c-desktop-v1.1.0.png)
+![SK150C Windows 控制台](docs/images/sk150c-desktop-v1.2.1.png)
 
 ## 手機 WEB 遠端控制
 

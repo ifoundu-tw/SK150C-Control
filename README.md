@@ -8,28 +8,27 @@ SK150C Windows Modbus 控制台，支援 ZK-SK150C 電源控制、M0–M10 快�
 
 | 功能 | 入口 |
 |---|---|
-| Windows 最新版 | **[下載 SK150C v1.2.1](https://github.com/ifoundu-tw/SK150C-Control/releases/latest)** |
+| Windows 最新版 | **[下載 SK150C v1.2.2](https://github.com/ifoundu-tw/SK150C-Control/releases/latest)** |
 | 手機 WEB 遠端控制 | **[開啟 https://sk150c-remote.web.app](https://sk150c-remote.web.app)** |
 | 版本政策 | [`version-policy.json`](version-policy.json) |
 
-目前正式版本：`v1.2.1`。正式採用緊湊新版布局，舊版已停止公開與支援。
+目前正式版本：`v1.2.2`。正式採用緊湊新版布局，舊版已停止公開與支援。
 
-本次 v1.2.1 覆蓋更新加入 37 個語言／地區選項，以及淺色／深色外觀（桌機在「連線／診斷」頁下方設定）。部分長篇提示採用機器翻譯。已安裝舊 v1.2.1 的使用者請重新下載，關閉程式後替換檔案；同版號不會觸發自動更新。
+v1.2.2 改採內嵌更新器與使用者同意更新：先進主介面，再背景檢查，右上角閃爍顯示新版號。點擊提示後再按一次同意，才產生更新器並下載安裝。保留 37 個語言／地區選項與淺色／深色外觀；部分長篇提示採用機器翻譯。
 
 ## Windows 安裝
 
-1. 從 [Latest Release](https://github.com/ifoundu-tw/SK150C-Control/releases/latest) 下載 `SK150C-WEB-v1.2.1.zip`。
+1. 從 [Latest Release](https://github.com/ifoundu-tw/SK150C-Control/releases/latest) 下載 `SK150C-WEB-v1.2.2.zip`。
 2. 將 ZIP 完整解壓縮到一個可寫入的資料夾，不要直接在 ZIP 內執行。
-3. 保持下列兩個檔案在同一資料夾：
+3. 執行套件內的主程式，無須額外下載更新器：
 
    ```text
    SK150C-Control.exe
-   SK150C.Updater.exe
    ```
 
 4. 執行 `SK150C-Control.exe`。
 
-`SK150C.Updater.exe` 是自動更新必要元件，請勿刪除或單獨移動。
+更新器已內嵌。只有使用者同意更新後，才會在主程式旁產生 `SK150C.Updater.exe`；刪除外部檔案不會影響之後從內嵌資源重建。
 
 ## 電腦端基本操作
 
@@ -40,7 +39,7 @@ SK150C Windows Modbus 控制台，支援 ZK-SK150C 電源控制、M0–M10 快�
 5. 連線後可設定電壓、電流、OVP/OCP、充電截止條件與 M0–M10 快捷組。
 6. 確認電源、負載與保護參數後，才使用右下角 `ON` / `OFF` 控制輸出。
 
-![SK150C Windows 控制台](docs/images/sk150c-desktop-v1.2.1.png)
+![SK150C Windows 控制台](docs/images/sk150c-desktop-v1.2.2.png)
 
 ## 手機 WEB 遠端控制
 
@@ -71,11 +70,31 @@ WEB 入口：**[https://sk150c-remote.web.app](https://sk150c-remote.web.app)**
 `v1.1.0` 是第一個支援 GitHub 自動更新的基礎版本。
 
 - 程式啟動後會在背景檢查正式最新版本。
-- 新版套件下載完成後會驗證 SHA-256。
+- 有新版時在右上角顯示新版號並閃爍，不彈窗、不強制更新。
+- 點擊提示後再按一次同意，才產生更新器並開始下載；下載完成後驗證 SHA-256。
 - 當設備輸出為 ON 或仍有 Modbus 指令執行時，安裝會延後。
 - 更新時由 `SK150C.Updater.exe` 備份舊檔、替換新版並重新啟動。
 
 更新政策以 [`version-policy.json`](version-policy.json) 為準。
+
+從舊版首次升級到 v1.2.2 時，仍可能顯示舊版的更新視窗；新流程在升級後生效。
+
+## English overview
+
+**SK150C-WEB** is a Windows desktop controller for the ZK-SK150C power supply, with a mobile browser remote at [sk150c-remote.web.app](https://sk150c-remote.web.app).
+
+- Serial Modbus RTU control, M0–M10 presets, voltage/current settings, protection parameters and applied charge-cutoff settings.
+- Live telemetry and charts, desktop/mobile synchronization, Google-account pairing, and multiple paired PCs per account.
+- 37 language/region options and light/dark appearance. Some extended messages are machine-translated.
+- An embedded updater and user-controlled updates: the main window opens first, checks for updates in the background, and shows a blinking version notice in the top-right corner without a discovery popup.
+- Click the notice once, then click again to consent. The updater is extracted next to the main executable only after consent. Downloads are SHA-256 verified, and installation restarts the application.
+- Installation is blocked while output is ON or device commands are busy. No forced update and no automatic output shutdown to permit installation.
+
+**Download:** [Latest Windows release](https://github.com/ifoundu-tw/SK150C-Control/releases/latest). Extract the ZIP into a writable folder and run `SK150C-Control.exe`; no separate updater download is required. Older clients may show their previous update dialog during the first upgrade to v1.2.2. This updates the Windows software, not the power supply firmware.
+
+**Safety:** mobile remote control is not an emergency-stop system. A network/PC disconnection leaves the existing hardware output unchanged. Confirm wiring, protection limits and the connected load before enabling output.
+
+This public repository distributes official releases and the update policy; source code is maintained privately.
 
 ## 安全提醒
 
@@ -95,9 +114,9 @@ WEB 入口：**[https://sk150c-remote.web.app](https://sk150c-remote.web.app)**
 
 配對憑證只有 5 分鐘效期且僅能使用一次。請從電腦端重新產生連結，並確認電腦上的確認碼。
 
-### 無法自動更新
+### 無法線上更新
 
-確認 `SK150C-Control.exe` 與 `SK150C.Updater.exe` 在同一資料夾，且該資料夾可寫入。若設備正在輸出，請先安全關閉輸出後再安裝。
+確認主程式資料夾可寫入、網路可連線到 GitHub，再點擊右上角提示並同意。若設備正在輸出，請先安全關閉輸出後再安裝。更新器會從主程式內重新產生。
 
 ## 支援範圍
 
